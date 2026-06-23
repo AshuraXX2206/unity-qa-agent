@@ -1,0 +1,128 @@
+test_suite: "Combat System"
+description: "Test attack, damage, death, respawn, and combat-related UI"
+setup:
+  scene: "Level_01"
+  wait_for_load: 3.0
+
+test_cases:
+  - id: "CB001"
+    name: "Basic Attack"
+    description: "Left-clicking should trigger the attack animation"
+    steps:
+      - action: mouse_click
+        x: 540
+        y: 360
+        button: "left"
+    verify:
+      - type: animation
+        field: "player.currentAnimation"
+        expected: "attack"
+
+  - id: "CB002"
+    name: "Attack Cooldown"
+    description: "Rapid clicks should not queue infinite attacks; animation must finish"
+    steps:
+      - action: mouse_click
+        x: 540
+        y: 360
+      - action: mouse_click
+        x: 540
+        y: 360
+      - action: mouse_click
+        x: 540
+        y: 360
+      - action: wait
+        duration: 1.0
+    verify:
+      - type: animation
+        field: "player.currentAnimation"
+        expected: "idle"
+        timeout: 3.0
+
+  - id: "CB003"
+    name: "Take Damage"
+    description: "Walking into an enemy should reduce player HP"
+    ai_verify: true
+    steps:
+      - action: key_press
+        key: "w"
+        duration: 3.0
+    verify:
+      - type: game_state
+        field: "player.hp"
+        operator: "less_than"
+        expected: 100
+        timeout: 5.0
+
+  - id: "CB004"
+    name: "Health Bar Updates"
+    description: "HP bar on the HUD should reflect current player HP"
+    ai_verify: true
+    steps:
+      - action: key_press
+        key: "w"
+        duration: 2.0
+      - action: wait
+        duration: 1.0
+    verify:
+      - type: ui_active
+        element: "HealthBar"
+      - type: screen_text
+        contains: "HP"
+        timeout: 1.0
+
+  - id: "CB005"
+    name: "Player Death"
+    description: "HP reaching 0 should trigger death state"
+    steps:
+      - action: key_press
+        key: "w"
+        duration: 10.0
+    verify:
+      - type: game_state
+        field: "player.isAlive"
+        operator: "equals"
+        expected: false
+        timeout: 15.0
+      - type: animation
+        field: "player.currentAnimation"
+        expected: "death"
+
+  - id: "CB006"
+    name: "Respawn After Death"
+    description: "After dying, pressing R or waiting should respawn the player"
+    steps:
+      - action: key_press
+        key: "w"
+        duration: 10.0
+      - action: wait
+        duration: 2.0
+      - action: key_press
+        key: "r"
+      - action: wait
+        duration: 2.0
+    verify:
+      - type: game_state
+        field: "player.isAlive"
+        operator: "equals"
+        expected: true
+        timeout: 5.0
+      - type: game_state
+        field: "player.hp"
+        operator: "equals"
+        expected: 100
+        tolerance: 5
+
+  - id: "CB007"
+    name: "Special Ability"
+    description: "Pressing Q should trigger special ability with cooldown UI text"
+    steps:
+      - action: key_press
+        key: "q"
+    verify:
+      - type: animation
+        field: "player.currentAnimation"
+        expected: "special"
+      - type: screen_text
+        contains: "Cooldown"
+        timeout: 2.0

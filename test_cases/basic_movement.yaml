@@ -1,0 +1,119 @@
+test_suite: "Basic Movement"
+description: "Test player movement mechanics — WASD, jump, sprint"
+setup:
+  scene: "Level_01"
+  wait_for_load: 2.0
+
+test_cases:
+  - id: "TC001"
+    name: "Move Forward"
+    description: "Pressing W should move the player forward along the Z axis"
+    steps:
+      - action: key_press
+        key: "w"
+        duration: 1.0
+    verify:
+      - type: game_state
+        field: "player.position.z"
+        operator: "greater_than"
+        expected: 0.5
+        tolerance: 0.1
+      - type: animation
+        field: "player.currentAnimation"
+        expected: "walk"
+
+  - id: "TC002"
+    name: "Move Backward"
+    description: "Pressing S should move the player backward"
+    steps:
+      - action: key_press
+        key: "s"
+        duration: 1.0
+    verify:
+      - type: game_state
+        field: "player.position.z"
+        operator: "less_than"
+        expected: 0.0
+        tolerance: 0.1
+
+  - id: "TC003"
+    name: "Strafe Left"
+    description: "Pressing A should strafe the player to the left"
+    steps:
+      - action: key_press
+        key: "a"
+        duration: 1.0
+    verify:
+      - type: game_state
+        field: "player.position.x"
+        operator: "less_than"
+        expected: 0.0
+        tolerance: 0.1
+
+  - id: "TC004"
+    name: "Strafe Right"
+    description: "Pressing D should strafe the player to the right"
+    steps:
+      - action: key_press
+        key: "d"
+        duration: 1.0
+    verify:
+      - type: game_state
+        field: "player.position.x"
+        operator: "greater_than"
+        expected: 0.5
+        tolerance: 0.1
+
+  - id: "TC005"
+    name: "Jump Mechanic"
+    description: "Pressing Space should elevate the player above ground"
+    steps:
+      - action: key_press
+        key: "space"
+      - action: wait
+        duration: 0.3
+    verify:
+      - type: game_state
+        field: "player.position.y"
+        operator: "greater_than"
+        expected: 0.1
+
+  - id: "TC006"
+    name: "Sprint"
+    description: "Holding Shift + W should move the player faster than walking"
+    steps:
+      - action: key_hold
+        key: "shift"
+        duration: 1.5
+      - action: key_press
+        key: "w"
+        duration: 1.5
+    verify:
+      - type: game_state
+        field: "player.position.z"
+        operator: "greater_than"
+        expected: 2.0
+        tolerance: 0.2
+      - type: animation
+        field: "player.currentAnimation"
+        expected: "run"
+
+  - id: "TC007"
+    name: "Diagonal Movement"
+    description: "Pressing W + D simultaneously should move diagonally"
+    steps:
+      - action: key_hold
+        key: "w"
+        duration: 1.0
+      - action: key_hold
+        key: "d"
+        duration: 1.0
+    verify:
+      - type: game_state
+        field: "player.position.z"
+        operator: "greater_than"
+        expected: 0.3
+      - type: game_state
+        field: "player.position.x"
+        operator: "greater_than"
+        expected: 0.3

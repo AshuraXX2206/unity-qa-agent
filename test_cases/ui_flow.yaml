@@ -1,0 +1,117 @@
+test_suite: "UI Flow"
+description: "Test opening/closing menus, inventory, settings, and HUD elements"
+setup:
+  scene: "Level_01"
+  wait_for_load: 2.0
+
+test_cases:
+  - id: "UI001"
+    name: "Open Inventory"
+    description: "Pressing I should open the InventoryPanel UI element"
+    steps:
+      - action: key_press
+        key: "i"
+    verify:
+      - type: ui_active
+        element: "InventoryPanel"
+        timeout: 1.0
+      - type: screen_text
+        contains: "Inventory"
+        timeout: 1.0
+
+  - id: "UI002"
+    name: "Close Inventory"
+    description: "Pressing I again or Escape should close the inventory"
+    steps:
+      - action: key_press
+        key: "i"
+      - action: wait
+        duration: 0.5
+      - action: key_press
+        key: "escape"
+    verify:
+      - type: game_state
+        field: "activeUI"
+        operator: "not_equals"
+        expected: "InventoryPanel"
+
+  - id: "UI003"
+    name: "Open Pause Menu"
+    description: "Pressing Escape should toggle the PauseMenu"
+    steps:
+      - action: key_press
+        key: "escape"
+    verify:
+      - type: ui_active
+        element: "PauseMenu"
+        timeout: 0.5
+      - type: screen_text
+        contains: "Resume"
+        timeout: 1.0
+
+  - id: "UI004"
+    name: "Open Settings from Pause Menu"
+    description: "Click the Settings button inside the pause menu"
+    steps:
+      - action: key_press
+        key: "escape"
+      - action: wait
+        duration: 0.5
+      - action: screen_image
+        template: "templates/settings_button.png"
+        confidence: 0.8
+      - action: mouse_click
+        x: 540
+        y: 400
+    verify:
+      - type: ui_active
+        element: "SettingsPanel"
+        timeout: 1.0
+      - type: screen_text
+        contains: "Settings"
+        timeout: 1.0
+
+  - id: "UI005"
+    name: "HUD Visibility"
+    description: "The HUD and HealthBar should be visible during gameplay"
+    steps:
+      - action: wait
+        duration: 0.5
+    verify:
+      - type: ui_active
+        element: "HUD"
+        timeout: 0.5
+      - type: ui_active
+        element: "HealthBar"
+        timeout: 0.5
+
+  - id: "UI006"
+    name: "Score Display"
+    description: "Score text should be visible on the HUD"
+    steps:
+      - action: wait
+        duration: 0.3
+    verify:
+      - type: screen_text
+        contains: "Score"
+        timeout: 1.0
+
+  - id: "UI007"
+    name: "Close Settings and Resume"
+    description: "Pressing Escape from settings should go back to pause, then resume"
+    steps:
+      - action: key_press
+        key: "escape"
+      - action: wait
+        duration: 0.5
+      - action: key_press
+        key: "escape"
+      - action: wait
+        duration: 0.5
+      - action: key_press
+        key: "escape"
+    verify:
+      - type: game_state
+        field: "activeUI"
+        operator: "not_equals"
+        expected: "PauseMenu"
