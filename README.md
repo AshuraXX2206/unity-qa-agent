@@ -1,14 +1,18 @@
 # Unity QA Agent
 
-AI-powered QA agent that automatically tests Unity games through a WebSocket bridge, screen capture, simulated input, and LLM-based verification.
+AI-powered QA agent that automatically tests Unity games. Install once, type `qagent` from anywhere.
 
 ## Features
 
+- **One-command install** — `pip install .` registers `qagent` as a global CLI command.
+- **Setup wizard** — First run guides you through API key, model, and project configuration.
+- **Interactive TUI** — Claude Code-style interface with streaming spinners, syntax highlighting, and rich tables.
 - **WebSocket Bridge** — C# Unity plugin streams game state JSON; Python agent sends input commands back.
+- **Codebase Analysis** — Reads your Unity C# source files to detect input bindings, game patterns, and auto-generate test cases.
 - **Screen Capture & OCR** — `mss` + `pytesseract` for reading on-screen text; OpenCV template matching for UI element detection.
 - **Simulated Input** — `pyautogui` drives keyboard and mouse as if a real player is testing.
 - **YAML Test Suites** — Declarative test cases with multiple verification types.
-- **AI Verification** — Claude (Anthropic) vision for complex checks that rule-based logic can't cover.
+- **AI Verification** — Gemini (default, free tier) or Claude vision for complex checks.
 - **Persona Profiles** — Casual, speedrunner, explorer, griefer — each with different timing and behaviour.
 - **Rich Reports** — Coloured console output + JSON files for CI integration.
 
@@ -33,26 +37,38 @@ AI-powered QA agent that automatically tests Unity games through a WebSocket bri
 
 ---
 
-## Setup
+## Quick Start
 
 ```bash
-# 1. Clone
+# 1. Clone & install
 git clone https://github.com/AshuraXX2206/unity-qa-agent.git
 cd unity-qa-agent
+pip install .
 
-# 2. Create virtual environment
+# 2. Launch (first run opens setup wizard)
+qagent
+```
+
+The setup wizard will ask for:
+1. **AI Provider** — Gemini (free tier) or Anthropic (Claude)
+2. **API Key** — get one at https://aistudio.google.com/apikey
+3. **AI Model** — gemini-2.5-flash recommended
+4. **Unity project path** — for codebase analysis
+5. **Default persona** — casual, speedrunner, explorer, or griefer
+6. **WebSocket URL** — defaults to ws://localhost:8765
+
+Settings are saved to `~/.qagent/config.yaml` and persist across sessions.
+
+### Alternative: Virtual Environment
+
+```bash
 python -m venv .venv
 # Windows
 .venv\Scripts\activate
 # macOS / Linux
 source .venv/bin/activate
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Configure environment
-cp .env.example .env
-# Edit .env and add your Anthropic API key (optional — only needed for AI verification)
+pip install .
+qagent
 ```
 
 ---
@@ -80,23 +96,38 @@ cp .env.example .env
 ## Running Tests
 
 ```bash
+# Interactive mode (recommended)
+qagent
+
 # Run a full test suite
-python -m agent.main run --suite test_cases/basic_movement.yaml --persona casual
+qagent run --suite test_cases/basic_movement.yaml --persona casual
 
 # Run a single test case
-python -m agent.main run --suite test_cases/basic_movement.yaml --id TC001
+qagent run --suite test_cases/basic_movement.yaml --id TC001
 
 # Screen-capture-only mode (no Unity bridge required)
-python -m agent.main run --suite test_cases/ui_flow.yaml --no-bridge
+qagent run --suite test_cases/ui_flow.yaml --no-bridge
 
 # Safe mode — log actions without actually executing input
-python -m agent.main run --suite test_cases/basic_movement.yaml --safe-mode
+qagent run --suite test_cases/basic_movement.yaml --safe-mode
 
 # List all test cases in a suite
-python -m agent.main list --suite test_cases/basic_movement.yaml
+qagent list --suite test_cases/basic_movement.yaml
 
 # Validate YAML syntax
-python -m agent.main validate --suite test_cases/basic_movement.yaml
+qagent validate --suite test_cases/basic_movement.yaml
+
+# Analyze Unity codebase and detect test opportunities
+qagent analyze --path /path/to/unity/Assets/Scripts
+
+# Auto-generate test cases from codebase analysis
+qagent generate --path /path/to/unity/Assets/Scripts --output test_cases/auto.yaml
+
+# Re-run setup wizard
+qagent setup
+
+# View current config
+qagent config
 ```
 
 ### Personas

@@ -1,31 +1,16 @@
 #!/usr/bin/env python3
 """Unity QA Agent — Claude Code-style interactive CLI.
 
-Usage examples
---------------
-  # Interactive mode (default)
-  python run.py
+Install globally:
+  pip install .
 
-  # Run a full suite with a persona
-  python run.py run --suite test_cases/basic_movement.yaml --persona casual
-
-  # Run a single test case
-  python run.py run --suite test_cases/basic_movement.yaml --id TC001
-
-  # Screen-capture-only mode (no Unity bridge)
-  python run.py run --suite test_cases/ui_flow.yaml --no-bridge
-
-  # Analyze a Unity codebase
-  python run.py analyze --path /path/to/unity/Assets/Scripts
-
-  # Auto-generate test cases from codebase
-  python run.py generate --path /path/to/unity/Assets/Scripts --output test_cases/auto.yaml
-
-  # List test cases in a suite
-  python run.py list --suite test_cases/basic_movement.yaml
-
-  # Validate YAML syntax
-  python run.py validate --suite test_cases/basic_movement.yaml
+Then just run:
+  qagent              # interactive mode (first run triggers setup wizard)
+  qagent run ...      # run test suites
+  qagent analyze ...  # analyze Unity codebase
+  qagent generate ... # auto-generate tests from code
+  qagent setup        # re-run setup wizard
+  qagent config       # view/edit configuration
 """
 
 from __future__ import annotations
@@ -47,10 +32,13 @@ from agent import tui
 from agent.ai_verifier import AIVerifier
 from agent.bridge_client import BridgeClient
 from agent.code_reader import CodeReader
+from agent.config import Config
+from agent.gemini_verifier import GeminiVerifier
 from agent.input_executor import InputExecutor
 from agent.persona import get_persona, PERSONAS
 from agent.report_generator import ReportGenerator
 from agent.screen_observer import ScreenObserver
+from agent.setup_wizard import run_setup_wizard
 from agent.test_runner import TestRunner
 
 console = Console()
@@ -80,7 +68,13 @@ def _shutdown(signum: int, _frame: object) -> None:
 def cmd_interactive(args: argparse.Namespace) -> None:
     """Interactive mode — Claude Code-style REPL."""
     load_dotenv()
-    tui.print_banner()
+    cfg = Config()
+
+    # First-run setup wizard
+    if not cfg.is_setup_complete:
+        cfg = run_setup_wizard(cfg)
+    else:
+        tui.print_banner()
 
     tui.system_message("Type a command or ask a question. Type 'help' for available commands.")
     tui.system_message("Press Ctrl+C to exit.\n")
@@ -96,8 +90,8 @@ def cmd_interactive(args: argparse.Namespace) -> None:
         if not raw:
             continue
 
-        cmd = raw.lower().split()
-        command = cmd[0]
+        cmd = raw.split()
+        command = cmd[0].lower()
 
         if command in ("exit", "quit", "q"):
             tui.system_message("Goodbye!")
@@ -107,7 +101,7 @@ def cmd_interactive(args: argparse.Namespace) -> None:
             _show_interactive_help()
 
         elif command == "run":
-            _interactive_run(cmd[1:], args)
+            _interactive_run(cmd[1:], args, cfg)
 
         elif command == "list":
             _interactive_list(cmd[1:])
@@ -116,10 +110,10 @@ def cmd_interactive(args: argparse.Namespace) -> None:
             _interactive_validate(cmd[1:])
 
         elif command == "analyze":
-            _interactive_analyze(cmd[1:])
+            _interactive_analyze(cmd[1:], cfg)
 
         elif command == "generate":
-            _interactive_generate(cmd[1:])
+            _interactive_generate(cmd[1:], cfg)
 
         elif command == "personas":
             _show_personas()
@@ -128,7 +122,13 @@ def cmd_interactive(args: argparse.Namespace) -> None:
             _show_available_suites()
 
         elif command == "status":
-            _show_status()
+            _show_status(cfg)
+
+        elif command == "setup":
+            cfg = run_setup_wizard(cfg)
+
+        elif command == "config":
+            _show_config(cfg)
 
         else:
             tui.agent_message(
@@ -150,7 +150,9 @@ def _show_interactive_help() -> None:
         "| `generate <path>` | Auto-generate test cases from code |\n"
         "| `personas` | Show available persona profiles |\n"
         "| `suites` | List available test suites |\n"
-        "| `status` | Show connection status |\n"
+        "| `status` | Show agent & connection status |\n"
+        "| `config` | View current configuration |\n"
+        "| `setup` | Re-run the setup wizard |\n"
         "| `help` | Show this help |\n"
         "| `exit` | Quit the agent |\n\n"
         "### Options\n"
@@ -160,9 +162,9 @@ def _show_interactive_help() -> None:
     )
 
 
-def _interactive_run(args_list: list, ns: argparse.Namespace) -> None:
+def _interactive_run(args_list: list, ns: argparse.Namespace,
+                     cfg: Optional[Config] = None) -> None:
     if not args_list:
-        # Show available suites and let user pick
         suites = _find_suites()
         if not suites:
             tui.error_message("No test suites found in test_cases/")
@@ -171,7 +173,7 @@ def _interactive_run(args_list: list, ns: argparse.Namespace) -> None:
     else:
         suite = args_list[0]
 
-    persona_name = "casual"
+    persona_name = (cfg["default_persona"] if cfg else "casual")
     safe_mode = False
     no_bridge = getattr(ns, "no_bridge", False)
     case_id = None
@@ -186,14 +188,15 @@ def _interactive_run(args_list: list, ns: argparse.Namespace) -> None:
         elif a == "--id" and i + 1 < len(args_list):
             case_id = args_list[i + 1]
 
-    _execute_run(suite, persona_name, safe_mode, no_bridge, case_id)
+    _execute_run(suite, persona_name, safe_mode, no_bridge, case_id, cfg)
 
 
 def _execute_run(suite: str, persona_name: str, safe_mode: bool,
-                 no_bridge: bool, case_id: Optional[str]) -> None:
+                 no_bridge: bool, case_id: Optional[str],
+                 cfg: Optional[Config] = None) -> None:
     global _bridge
 
-    ws_url = os.getenv("UNITY_WS_URL", "ws://localhost:8765")
+    ws_url = (cfg["unity_ws_url"] if cfg else None) or os.getenv("UNITY_WS_URL", "ws://localhost:8765")
 
     # Bridge connection with thinking spinner
     bridge = BridgeClient(url=ws_url)
@@ -222,7 +225,19 @@ def _execute_run(suite: str, persona_name: str, safe_mode: bool,
 
     observer = ScreenObserver()
     executor = InputExecutor(safe_mode=safe_mode, action_delay=persona.input_delay)
-    ai_verifier = AIVerifier() if os.getenv("ANTHROPIC_API_KEY") else None
+
+    # AI verifier — use config provider or fall back to env vars
+    ai_verifier = None
+    if cfg and cfg.api_key:
+        if cfg.ai_provider == "gemini":
+            ai_verifier = GeminiVerifier(api_key=cfg.api_key, model=cfg.model)
+        else:
+            ai_verifier = AIVerifier(api_key=cfg.api_key, model=cfg.model)
+    elif os.getenv("GEMINI_API_KEY"):
+        ai_verifier = GeminiVerifier()
+    elif os.getenv("ANTHROPIC_API_KEY"):
+        ai_verifier = AIVerifier()
+
     reporter = ReportGenerator()
 
     runner = TestRunner(
@@ -314,9 +329,10 @@ def _interactive_validate(args_list: list) -> None:
         tui.success_message(f"{suite} is valid")
 
 
-def _interactive_analyze(args_list: list) -> None:
+def _interactive_analyze(args_list: list, cfg: Optional[Config] = None) -> None:
+    default_path = (cfg.unity_project_path if cfg else "") or "."
     if not args_list:
-        path = tui.prompt_input("Path to Unity Assets/Scripts:", ".")
+        path = tui.prompt_input("Path to Unity Assets/Scripts:", default_path)
     else:
         path = args_list[0]
 
@@ -339,9 +355,10 @@ def _interactive_analyze(args_list: list) -> None:
             tui.success_message(f"Test suite exported → {output}")
 
 
-def _interactive_generate(args_list: list) -> None:
+def _interactive_generate(args_list: list, cfg: Optional[Config] = None) -> None:
+    default_path = (cfg.unity_project_path if cfg else "") or "."
     if not args_list:
-        path = tui.prompt_input("Path to Unity Assets/Scripts:", ".")
+        path = tui.prompt_input("Path to Unity Assets/Scripts:", default_path)
     else:
         path = args_list[0]
 
@@ -429,21 +446,50 @@ def _show_available_suites() -> None:
     console.print()
 
 
-def _show_status() -> None:
+def _show_status(cfg: Optional[Config] = None) -> None:
     bridge_status = "[green]Connected[/]" if (_bridge and _bridge.connected) else "[red]Disconnected[/]"
-    api_key = "[green]Set[/]" if os.getenv("ANTHROPIC_API_KEY") else "[yellow]Not set[/]"
+    provider = cfg.ai_provider if cfg else "unknown"
+    has_key = bool(cfg.api_key) if cfg else bool(os.getenv("GEMINI_API_KEY") or os.getenv("ANTHROPIC_API_KEY"))
+    key_status = "[green]Set[/]" if has_key else "[yellow]Not set[/]"
+    model = cfg.model if cfg else "—"
 
     from rich.table import Table
     table = Table(title="Agent Status", border_style="cyan", show_header=False)
     table.add_column("Property", style="bold")
     table.add_column("Status")
     table.add_row("Unity Bridge", bridge_status)
-    table.add_row("Anthropic API Key", api_key)
+    table.add_row("AI Provider", provider.title())
+    table.add_row("AI Model", model)
+    table.add_row("API Key", key_status)
+    table.add_row("Default Persona", cfg["default_persona"] if cfg else "casual")
+    table.add_row("Unity Project", cfg.unity_project_path or "[dim]not set[/]" if cfg else "—")
     table.add_row("Working Directory", str(Path.cwd()))
+    table.add_row("Config File", Config.config_path() if cfg else "—")
     table.add_row("Test Suites", str(len(_find_suites())))
 
     console.print()
     console.print(table)
+    console.print()
+
+
+def _show_config(cfg: Config) -> None:
+    """Display current configuration."""
+    from rich.table import Table
+    from rich.panel import Panel
+
+    table = Table(title="Configuration", border_style="cyan", show_header=True)
+    table.add_column("Key", style="bold")
+    table.add_column("Value")
+
+    for key, value in cfg.data.items():
+        display = str(value)
+        if "api_key" in key and value:
+            display = f"****{str(value)[-4:]}" if len(str(value)) > 4 else "****"
+        table.add_row(key, display)
+
+    console.print()
+    console.print(table)
+    console.print(f"  [dim]Config file: {Config.config_path()}[/]")
     console.print()
 
 
@@ -460,6 +506,7 @@ def _find_suites() -> list:
 def cmd_run(args: argparse.Namespace) -> None:
     """Execute test suite (non-interactive)."""
     load_dotenv()
+    cfg = Config()
     tui.print_banner()
     _execute_run(
         args.suite,
@@ -467,8 +514,21 @@ def cmd_run(args: argparse.Namespace) -> None:
         getattr(args, "safe_mode", False),
         args.no_bridge,
         args.id,
+        cfg,
     )
     sys.exit(0)
+
+
+def cmd_setup(args: argparse.Namespace) -> None:
+    """Run setup wizard."""
+    cfg = Config()
+    run_setup_wizard(cfg)
+
+
+def cmd_config(args: argparse.Namespace) -> None:
+    """Show configuration."""
+    cfg = Config()
+    _show_config(cfg)
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -501,7 +561,7 @@ def cmd_generate(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="unity-qa-agent",
+        prog="qagent",
         description="AI-powered QA agent for Unity games",
     )
     parser.add_argument("-v", "--verbose", action="store_true",
@@ -545,6 +605,14 @@ def build_parser() -> argparse.ArgumentParser:
     gen_p.add_argument("--output", default="test_cases/auto_generated.yaml",
                        help="Output YAML path")
     gen_p.set_defaults(func=cmd_generate)
+
+    # setup
+    setup_p = sub.add_parser("setup", help="Run first-time setup wizard")
+    setup_p.set_defaults(func=cmd_setup)
+
+    # config
+    config_p = sub.add_parser("config", help="View current configuration")
+    config_p.set_defaults(func=cmd_config)
 
     return parser
 

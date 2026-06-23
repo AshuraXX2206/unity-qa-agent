@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unity-qa-agent"
+version = "0.1.0"
+description = "AI-powered QA agent for automated Unity game testing"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [
+    {name = "AshuraXX2206"},
+]
+
+dependencies = [
+    "pyautogui>=0.9.54",
+    "mss>=9.0.1",
+    "opencv-python>=4.9.0",
+    "Pillow>=10.2.0",
+    "websockets>=12.0",
+    "anthropic>=0.25.0",
+    "google-generativeai>=0.5.0",
+    "pytesseract>=0.3.10",
+    "pyyaml>=6.0.1",
+    "python-dotenv>=1.0.1",
+    "rich>=13.7.0",
+]
+
+[project.scripts]
+qagent = "agent.main:main"
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "mypy",
+]
+
+[tool.setuptools.packages.find]
+include = ["agent*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
