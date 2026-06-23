@@ -277,6 +277,20 @@ class TestRunner:
 
     # ── helpers ───────────────────────────────────────────────────────
 
+    def _run_setup(self, setup: Dict[str, Any]) -> None:
+        """Handle suite-level setup: wait for scene load, etc."""
+        scene = setup.get("scene", "")
+        wait = setup.get("wait_for_load", 0)
+        if scene:
+            log.info("Expecting scene: %s", scene)
+            state = self._bridge.get_game_state()
+            if state and state.get("scene") != scene:
+                log.warning("Current scene '%s' != expected '%s'",
+                            state.get("scene"), scene)
+        if wait > 0:
+            log.info("Waiting %.1fs for scene to load…", wait)
+            time.sleep(wait)
+
     @staticmethod
     def _load_suite(path: str) -> Dict[str, Any]:
         with open(path, "r", encoding="utf-8") as f:

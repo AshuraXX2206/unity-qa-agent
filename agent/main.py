@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
-"""Unity QA Agent — CLI entry point.
+"""Unity QA Agent — Claude Code-style interactive CLI.
 
 Usage examples
 --------------
+  # Interactive mode (default)
+  python run.py
+
   # Run a full suite with a persona
-  python -m agent.main run --suite test_cases/basic_movement.yaml --persona casual
+  python run.py run --suite test_cases/basic_movement.yaml --persona casual
 
   # Run a single test case
-  python -m agent.main run --suite test_cases/basic_movement.yaml --id TC001
+  python run.py run --suite test_cases/basic_movement.yaml --id TC001
 
   # Screen-capture-only mode (no Unity bridge)
-  python -m agent.main run --suite test_cases/ui_flow.yaml --no-bridge
+  python run.py run --suite test_cases/ui_flow.yaml --no-bridge
+
+  # Analyze a Unity codebase
+  python run.py analyze --path /path/to/unity/Assets/Scripts
+
+  # Auto-generate test cases from codebase
+  python run.py generate --path /path/to/unity/Assets/Scripts --output test_cases/auto.yaml
 
   # List test cases in a suite
-  python -m agent.main list --suite test_cases/basic_movement.yaml
+  python run.py list --suite test_cases/basic_movement.yaml
 
   # Validate YAML syntax
-  python -m agent.main validate --suite test_cases/basic_movement.yaml
+  python run.py validate --suite test_cases/basic_movement.yaml
 """
 
 from __future__ import annotations
@@ -26,16 +35,20 @@ import logging
 import os
 import signal
 import sys
+import time
+from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.logging import RichHandler
 
+from agent import tui
 from agent.ai_verifier import AIVerifier
 from agent.bridge_client import BridgeClient
+from agent.code_reader import CodeReader
 from agent.input_executor import InputExecutor
-from agent.persona import get_persona
+from agent.persona import get_persona, PERSONAS
 from agent.report_generator import ReportGenerator
 from agent.screen_observer import ScreenObserver
 from agent.test_runner import TestRunner
@@ -64,34 +77,149 @@ def _shutdown(signum: int, _frame: object) -> None:
 # ── commands ──────────────────────────────────────────────────────────
 
 
-def cmd_run(args: argparse.Namespace) -> None:
-    """Execute test suite(s)."""
+def cmd_interactive(args: argparse.Namespace) -> None:
+    """Interactive mode — Claude Code-style REPL."""
+    load_dotenv()
+    tui.print_banner()
+
+    tui.system_message("Type a command or ask a question. Type 'help' for available commands.")
+    tui.system_message("Press Ctrl+C to exit.\n")
+
+    while True:
+        try:
+            raw = console.input("[bold cyan]>[/] ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n")
+            tui.system_message("Goodbye!")
+            break
+
+        if not raw:
+            continue
+
+        cmd = raw.lower().split()
+        command = cmd[0]
+
+        if command in ("exit", "quit", "q"):
+            tui.system_message("Goodbye!")
+            break
+
+        elif command == "help":
+            _show_interactive_help()
+
+        elif command == "run":
+            _interactive_run(cmd[1:], args)
+
+        elif command == "list":
+            _interactive_list(cmd[1:])
+
+        elif command == "validate":
+            _interactive_validate(cmd[1:])
+
+        elif command == "analyze":
+            _interactive_analyze(cmd[1:])
+
+        elif command == "generate":
+            _interactive_generate(cmd[1:])
+
+        elif command == "personas":
+            _show_personas()
+
+        elif command == "suites":
+            _show_available_suites()
+
+        elif command == "status":
+            _show_status()
+
+        else:
+            tui.agent_message(
+                f"Unknown command: **{command}**\n\n"
+                "Available commands: `run`, `list`, `validate`, `analyze`, "
+                "`generate`, `personas`, `suites`, `status`, `help`, `exit`"
+            )
+
+
+def _show_interactive_help() -> None:
+    tui.agent_message(
+        "## Available Commands\n\n"
+        "| Command | Description |\n"
+        "|---------|-------------|\n"
+        "| `run <suite.yaml>` | Execute a test suite |\n"
+        "| `list <suite.yaml>` | List test cases in a suite |\n"
+        "| `validate <suite.yaml>` | Validate YAML syntax |\n"
+        "| `analyze <path>` | Analyze Unity C# codebase |\n"
+        "| `generate <path>` | Auto-generate test cases from code |\n"
+        "| `personas` | Show available persona profiles |\n"
+        "| `suites` | List available test suites |\n"
+        "| `status` | Show connection status |\n"
+        "| `help` | Show this help |\n"
+        "| `exit` | Quit the agent |\n\n"
+        "### Options\n"
+        "- Add `--persona <name>` to `run` to choose behaviour\n"
+        "- Add `--safe-mode` to `run` to log without executing\n"
+        "- Add `--no-bridge` to `run` for screen-capture-only mode"
+    )
+
+
+def _interactive_run(args_list: list, ns: argparse.Namespace) -> None:
+    if not args_list:
+        # Show available suites and let user pick
+        suites = _find_suites()
+        if not suites:
+            tui.error_message("No test suites found in test_cases/")
+            return
+        suite = tui.prompt_choice("Select a test suite:", suites)
+    else:
+        suite = args_list[0]
+
+    persona_name = "casual"
+    safe_mode = False
+    no_bridge = getattr(ns, "no_bridge", False)
+    case_id = None
+
+    for i, a in enumerate(args_list):
+        if a == "--persona" and i + 1 < len(args_list):
+            persona_name = args_list[i + 1]
+        elif a == "--safe-mode":
+            safe_mode = True
+        elif a == "--no-bridge":
+            no_bridge = True
+        elif a == "--id" and i + 1 < len(args_list):
+            case_id = args_list[i + 1]
+
+    _execute_run(suite, persona_name, safe_mode, no_bridge, case_id)
+
+
+def _execute_run(suite: str, persona_name: str, safe_mode: bool,
+                 no_bridge: bool, case_id: Optional[str]) -> None:
     global _bridge
 
-    load_dotenv()
-
     ws_url = os.getenv("UNITY_WS_URL", "ws://localhost:8765")
-    safe_mode = getattr(args, "safe_mode", False)
 
-    # Bridge
+    # Bridge connection with thinking spinner
     bridge = BridgeClient(url=ws_url)
     _bridge = bridge
-    if not args.no_bridge:
-        bridge.start()
-        console.print(f"[cyan]Connecting to Unity bridge at {ws_url}…[/]")
-        import time
-        deadline = time.monotonic() + 5
-        while not bridge.connected and time.monotonic() < deadline:
-            time.sleep(0.3)
-        if bridge.connected:
-            console.print("[green]Connected to Unity bridge[/]")
-        else:
-            console.print("[yellow]Unity bridge not available — screen-capture-only mode[/]")
-    else:
-        console.print("[yellow]Bridge disabled — screen-capture-only mode[/]")
 
-    # Components
-    persona = get_persona(args.persona)
+    if not no_bridge:
+        with tui.thinking("Connecting to Unity bridge"):
+            bridge.start()
+            deadline = time.monotonic() + 5
+            while not bridge.connected and time.monotonic() < deadline:
+                time.sleep(0.3)
+
+        if bridge.connected:
+            tui.success_message("Connected to Unity bridge")
+        else:
+            tui.warning_message("Unity bridge not available — screen-capture-only mode")
+    else:
+        tui.system_message("Bridge disabled — screen-capture-only mode")
+
+    # Load persona
+    try:
+        persona = get_persona(persona_name)
+    except KeyError as e:
+        tui.error_message(str(e))
+        return
+
     observer = ScreenObserver()
     executor = InputExecutor(safe_mode=safe_mode, action_delay=persona.input_delay)
     ai_verifier = AIVerifier() if os.getenv("ANTHROPIC_API_KEY") else None
@@ -105,46 +233,267 @@ def cmd_run(args: argparse.Namespace) -> None:
         ai_verifier=ai_verifier,
     )
 
-    console.print(f"[bold]Suite:[/]   {args.suite}")
-    console.print(f"[bold]Persona:[/] {persona.name} — {persona.description}")
-    console.print()
+    # Load and validate suite
+    with tui.thinking("Loading test suite"):
+        errors = TestRunner.validate_suite(suite)
+    if errors:
+        tui.error_message(f"Suite validation failed:\n" + "\n".join(f"  - {e}" for e in errors))
+        return
 
-    result = runner.run_suite(args.suite, case_id=args.id)
+    cases = TestRunner.list_cases(suite)
+    tui.show_test_execution_header(suite, persona.name, len(cases))
 
+    # Execute with progress
+    progress = tui.create_suite_progress()
+    with progress:
+        task = progress.add_task("Running tests…", total=len(cases))
+
+        result = runner.run_suite(suite, case_id=case_id)
+
+        for cr in result.cases:
+            tui.show_test_progress(
+                cr.id, cr.name, cr.status, cr.duration_seconds,
+                error=cr.error,
+                step_num=cr.steps_executed,
+                total_steps=cr.steps_executed,
+            )
+            progress.advance(task)
+
+    # Report
     reporter.print_report(result)
     json_path = reporter.save_json(result)
-    console.print(f"[dim]JSON report → {json_path}[/]")
+    tui.show_report_summary(result.to_dict())
+    tui.system_message(f"JSON report saved → {json_path}")
 
     bridge.stop()
 
-    # Exit code reflects test outcome
-    sys.exit(0 if result.failed == 0 else 1)
 
+def _interactive_list(args_list: list) -> None:
+    if not args_list:
+        suites = _find_suites()
+        if not suites:
+            tui.error_message("No test suites found in test_cases/")
+            return
+        suite = tui.prompt_choice("Select a test suite:", suites)
+    else:
+        suite = args_list[0]
 
-def cmd_list(args: argparse.Namespace) -> None:
-    """List test cases in a suite."""
+    with tui.thinking("Loading suite"):
+        cases = TestRunner.list_cases(suite)
+
     from rich.table import Table
-
-    cases = TestRunner.list_cases(args.suite)
-    table = Table(title=f"Test Cases — {args.suite}", border_style="blue")
+    table = Table(title=f"Test Cases — {suite}", border_style="blue")
     table.add_column("ID", style="bold")
     table.add_column("Name")
     table.add_column("Description", style="dim")
     for c in cases:
         table.add_row(c["id"], c["name"], c["description"])
+    console.print()
     console.print(table)
+    console.print()
+
+
+def _interactive_validate(args_list: list) -> None:
+    if not args_list:
+        suites = _find_suites()
+        if not suites:
+            tui.error_message("No test suites found in test_cases/")
+            return
+        suite = tui.prompt_choice("Select a test suite:", suites)
+    else:
+        suite = args_list[0]
+
+    with tui.thinking("Validating YAML"):
+        errors = TestRunner.validate_suite(suite)
+
+    if errors:
+        tui.error_message(f"Validation failed for {suite}:")
+        for e in errors:
+            console.print(f"    [red]-[/] {e}")
+    else:
+        tui.success_message(f"{suite} is valid")
+
+
+def _interactive_analyze(args_list: list) -> None:
+    if not args_list:
+        path = tui.prompt_input("Path to Unity Assets/Scripts:", ".")
+    else:
+        path = args_list[0]
+
+    if not Path(path).exists():
+        tui.error_message(f"Path not found: {path}")
+        return
+
+    with tui.thinking("Analyzing codebase"):
+        reader = CodeReader(path)
+        reader.scan()
+        summary = reader.get_summary()
+
+    tui.show_codebase_analysis(summary)
+
+    if reader.suggestions:
+        tui.show_test_suggestions(reader.suggestions)
+        if tui.prompt_confirm("Export suggestions as YAML test suite?"):
+            output = tui.prompt_input("Output path:", "test_cases/auto_generated.yaml")
+            reader.export_suggestions_yaml(output)
+            tui.success_message(f"Test suite exported → {output}")
+
+
+def _interactive_generate(args_list: list) -> None:
+    if not args_list:
+        path = tui.prompt_input("Path to Unity Assets/Scripts:", ".")
+    else:
+        path = args_list[0]
+
+    output = "test_cases/auto_generated.yaml"
+    for i, a in enumerate(args_list):
+        if a == "--output" and i + 1 < len(args_list):
+            output = args_list[i + 1]
+
+    if not Path(path).exists():
+        tui.error_message(f"Path not found: {path}")
+        return
+
+    with tui.thinking("Scanning codebase and generating tests"):
+        reader = CodeReader(path)
+        reader.scan()
+
+    if not reader.suggestions:
+        tui.warning_message("No test suggestions could be generated from the codebase")
+        return
+
+    tui.show_test_suggestions(reader.suggestions)
+
+    with tui.thinking("Writing YAML"):
+        outpath = reader.export_suggestions_yaml(output)
+
+    tui.success_message(f"Generated {len(reader.suggestions)} test cases → {outpath}")
+
+    # Show the generated YAML
+    import yaml
+    with open(outpath) as f:
+        data = yaml.safe_load(f)
+    tui.show_yaml(data, title=f"Generated: {outpath}")
+
+
+def _show_personas() -> None:
+    from rich.table import Table
+    table = Table(title="Persona Profiles", border_style="cyan")
+    table.add_column("Name", style="bold cyan")
+    table.add_column("Description")
+    table.add_column("Delay", justify="right")
+    table.add_column("Randomness", justify="right")
+    table.add_column("Exploration", justify="right")
+    table.add_column("Skip Tutorial", justify="center")
+
+    for name, p in PERSONAS.items():
+        table.add_row(
+            name,
+            p.description,
+            f"{p.input_delay}s",
+            f"{p.action_randomness:.0%}",
+            f"{p.exploration_rate:.0%}",
+            "[green]Yes[/]" if p.skip_tutorial else "[red]No[/]",
+        )
+    console.print()
+    console.print(table)
+    console.print()
+
+
+def _show_available_suites() -> None:
+    suites = _find_suites()
+    if not suites:
+        tui.warning_message("No test suites found in test_cases/")
+        return
+
+    from rich.table import Table
+    table = Table(title="Available Test Suites", border_style="blue")
+    table.add_column("File", style="bold")
+    table.add_column("Suite Name")
+    table.add_column("Cases", justify="right")
+
+    import yaml
+    for s in suites:
+        try:
+            with open(s) as f:
+                data = yaml.safe_load(f)
+            name = data.get("test_suite", "—")
+            count = len(data.get("test_cases", []))
+        except Exception:
+            name = "—"
+            count = 0
+        table.add_row(s, name, str(count))
+
+    console.print()
+    console.print(table)
+    console.print()
+
+
+def _show_status() -> None:
+    bridge_status = "[green]Connected[/]" if (_bridge and _bridge.connected) else "[red]Disconnected[/]"
+    api_key = "[green]Set[/]" if os.getenv("ANTHROPIC_API_KEY") else "[yellow]Not set[/]"
+
+    from rich.table import Table
+    table = Table(title="Agent Status", border_style="cyan", show_header=False)
+    table.add_column("Property", style="bold")
+    table.add_column("Status")
+    table.add_row("Unity Bridge", bridge_status)
+    table.add_row("Anthropic API Key", api_key)
+    table.add_row("Working Directory", str(Path.cwd()))
+    table.add_row("Test Suites", str(len(_find_suites())))
+
+    console.print()
+    console.print(table)
+    console.print()
+
+
+def _find_suites() -> list:
+    p = Path("test_cases")
+    if not p.exists():
+        return []
+    return sorted(str(f) for f in p.glob("*.yaml"))
+
+
+# ── Non-interactive command wrappers ──────────────────────────────────
+
+
+def cmd_run(args: argparse.Namespace) -> None:
+    """Execute test suite (non-interactive)."""
+    load_dotenv()
+    tui.print_banner()
+    _execute_run(
+        args.suite,
+        args.persona,
+        getattr(args, "safe_mode", False),
+        args.no_bridge,
+        args.id,
+    )
+    sys.exit(0)
+
+
+def cmd_list(args: argparse.Namespace) -> None:
+    """List test cases in a suite."""
+    _interactive_list([args.suite])
 
 
 def cmd_validate(args: argparse.Namespace) -> None:
     """Validate a YAML test suite."""
-    errors = TestRunner.validate_suite(args.suite)
-    if errors:
-        console.print(f"[red]Validation failed for {args.suite}:[/]")
-        for e in errors:
-            console.print(f"  [red]•[/] {e}")
-        sys.exit(1)
-    else:
-        console.print(f"[green]OK[/] — {args.suite} is valid")
+    _interactive_validate([args.suite])
+
+
+def cmd_analyze(args: argparse.Namespace) -> None:
+    """Analyze Unity codebase."""
+    tui.print_banner()
+    _interactive_analyze([args.path])
+
+
+def cmd_generate(args: argparse.Namespace) -> None:
+    """Generate test cases from codebase."""
+    tui.print_banner()
+    parts = [args.path]
+    if args.output:
+        parts += ["--output", args.output]
+    _interactive_generate(parts)
 
 
 # ── CLI parser ────────────────────────────────────────────────────────
@@ -155,16 +504,22 @@ def build_parser() -> argparse.ArgumentParser:
         prog="unity-qa-agent",
         description="AI-powered QA agent for Unity games",
     )
-    parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Enable debug logging")
+    parser.add_argument("--no-bridge", action="store_true",
+                        help="Skip Unity bridge (screen-capture only)")
     sub = parser.add_subparsers(dest="command")
 
     # run
     run_p = sub.add_parser("run", help="Execute a test suite")
     run_p.add_argument("--suite", required=True, help="Path to YAML test suite")
-    run_p.add_argument("--persona", default="casual", help="Persona profile (default: casual)")
+    run_p.add_argument("--persona", default="casual",
+                       help="Persona profile (default: casual)")
     run_p.add_argument("--id", default=None, help="Run only this test case ID")
-    run_p.add_argument("--no-bridge", action="store_true", help="Skip Unity bridge (screen-capture only)")
-    run_p.add_argument("--safe-mode", action="store_true", help="Log actions without executing them")
+    run_p.add_argument("--no-bridge", action="store_true",
+                       help="Skip Unity bridge (screen-capture only)")
+    run_p.add_argument("--safe-mode", action="store_true",
+                       help="Log actions without executing them")
     run_p.set_defaults(func=cmd_run)
 
     # list
@@ -177,22 +532,37 @@ def build_parser() -> argparse.ArgumentParser:
     val_p.add_argument("--suite", required=True, help="Path to YAML test suite")
     val_p.set_defaults(func=cmd_validate)
 
+    # analyze
+    ana_p = sub.add_parser("analyze", help="Analyze Unity C# codebase")
+    ana_p.add_argument("--path", required=True,
+                       help="Path to Unity Assets/Scripts directory")
+    ana_p.set_defaults(func=cmd_analyze)
+
+    # generate
+    gen_p = sub.add_parser("generate", help="Auto-generate test cases from code")
+    gen_p.add_argument("--path", required=True,
+                       help="Path to Unity Assets/Scripts directory")
+    gen_p.add_argument("--output", default="test_cases/auto_generated.yaml",
+                       help="Output YAML path")
+    gen_p.set_defaults(func=cmd_generate)
+
     return parser
 
 
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    _setup_logging(args.verbose)
+    _setup_logging(getattr(args, "verbose", False))
 
     signal.signal(signal.SIGINT, _shutdown)
-    signal.signal(signal.SIGTERM, _shutdown)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _shutdown)
 
     if args.command is None:
-        parser.print_help()
-        sys.exit(0)
-
-    args.func(args)
+        # Launch interactive mode
+        cmd_interactive(args)
+    else:
+        args.func(args)
 
 
 if __name__ == "__main__":
