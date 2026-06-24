@@ -76,6 +76,26 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         },
     },
     {
+        "name": "key_release",
+        "description": "Release a key that is currently held down (pair with a held key_press).",
+        "input_schema": {
+            "type": "object",
+            "properties": {"key": {"type": "string"}},
+            "required": ["key"],
+        },
+    },
+    {
+        "name": "key_combo",
+        "description": "Press several keys at once as a combo, e.g. ['ctrl','s'] or ['shift','w'].",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "keys": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["keys"],
+        },
+    },
+    {
         "name": "mouse_click",
         "description": "Click the mouse at absolute screen coordinates (x, y).",
         "input_schema": {
@@ -166,6 +186,18 @@ def _h_press_key(args: Dict[str, Any], ctx: ToolContext) -> List[Dict[str, Any]]
     return [_text(msg)]
 
 
+def _h_key_release(args: Dict[str, Any], ctx: ToolContext) -> List[Dict[str, Any]]:
+    key = str(args.get("key", ""))
+    ctx.executor.release_key(key)
+    return [_text(f"Released '{key}'.")]
+
+
+def _h_key_combo(args: Dict[str, Any], ctx: ToolContext) -> List[Dict[str, Any]]:
+    keys = [str(k) for k in args.get("keys", [])]
+    ctx.executor.press_combo(*keys)
+    return [_text(f"Pressed combo: {'+'.join(keys)}.")]
+
+
 def _h_mouse_click(args: Dict[str, Any], ctx: ToolContext) -> List[Dict[str, Any]]:
     x, y = int(args.get("x", 0)), int(args.get("y", 0))
     button = str(args.get("button", "left"))
@@ -198,6 +230,8 @@ _HANDLERS = {
     "capture_screenshot": _h_capture_screenshot,
     "read_game_state": _h_read_game_state,
     "press_key": _h_press_key,
+    "key_release": _h_key_release,
+    "key_combo": _h_key_combo,
     "mouse_click": _h_mouse_click,
     "wait": _h_wait,
     "ocr_screen": _h_ocr_screen,

@@ -122,10 +122,15 @@ class OpenAICompatProvider(LLMProvider):
         stop_reason = "tool_use" if finish == "tool_calls" else (
             "end_turn" if finish == "stop" else finish
         )
+        u = data.get("usage") or {}
         return LLMResponse(
             text=(message.get("content") or "").strip(),
             tool_calls=tool_calls,
             stop_reason=stop_reason,
+            usage={
+                "input_tokens": u.get("prompt_tokens", 0) or 0,
+                "output_tokens": u.get("completion_tokens", 0) or 0,
+            },
             raw=data,
         )
 

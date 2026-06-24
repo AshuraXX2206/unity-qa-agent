@@ -203,7 +203,8 @@ class ReportGenerator:
             f"[bold]Goal:[/] {result.goal}\n"
             f"[bold]Provider:[/] {result.provider}    [bold]Model:[/] {result.model}\n"
             f"[bold]Verdict:[/] [{color}]{verdict}[/]    "
-            f"[dim](stopped: {result.stopped_reason}, {len(result.steps)} tool calls)[/]"
+            f"[dim](stopped: {result.stopped_reason}, {len(result.steps)} tool calls"
+            f"{f', {result.total_tokens:,} tokens' if getattr(result, 'total_tokens', 0) else ''})[/]"
         )
         if finding:
             body += f"\n\n[bold]Summary:[/] {finding.summary}"

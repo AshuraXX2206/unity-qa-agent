@@ -37,6 +37,7 @@ class LLMResponse:
     text: str = ""
     tool_calls: List[ToolCall] = field(default_factory=list)
     stop_reason: str = ""           # "end_turn" | "tool_use" | "refusal" | ...
+    usage: Dict[str, int] = field(default_factory=dict)  # {input_tokens, output_tokens}
     raw: Any = None                 # provider-native response, for debugging
 
 

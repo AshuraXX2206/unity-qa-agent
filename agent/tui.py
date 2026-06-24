@@ -565,6 +565,7 @@ class AgentDashboard:
         self._step = 0
         self._feed: List[Text] = []
         self._tool_counts: Dict[str, int] = {}
+        self._tokens = {"input": 0, "output": 0}
         self._status = "running"
         self._verdict = ""
         self._summary = ""
@@ -593,6 +594,10 @@ class AgentDashboard:
         """``on_event`` callback for :class:`agent.qa_agent.QAAgent`."""
         if kind == "step":
             self._step = data.get("step", self._step)
+            return
+        if kind == "usage":
+            self._tokens["input"] = data.get("input", self._tokens["input"])
+            self._tokens["output"] = data.get("output", self._tokens["output"])
             return
         if kind == "thought":
             self._add("thought", _truncate(str(data), 240))
@@ -658,6 +663,9 @@ class AgentDashboard:
         table.add_row("Step", f"{self._step}/{self.max_steps}")
         table.add_row("Elapsed", f"{self._elapsed():.0f}s")
         table.add_row("Actions", str(sum(self._tool_counts.values())))
+        tok = self._tokens["input"] + self._tokens["output"]
+        if tok:
+            table.add_row("Tokens", f"{tok:,}")
         if self._verdict:
             color = _VERDICT_COLOR.get(self._verdict, "yellow")
             table.add_row("Verdict", f"[{color}]{self._verdict}[/]")

@@ -1,21 +1,47 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
-using System.Threading;
 using UnityEngine;
+#if ENABLE_INPUT_SYSTEM
+using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.LowLevel;
+#endif
 
 /// <summary>
-/// QABridge — WebSocket server that exposes game state and accepts input commands
-/// from an external QA agent. Attach to any GameObject in the scene.
+/// QABridge — WebSocket server that exposes game state and accepts simulated
+/// input from an external QA agent. Attach to any GameObject in the scene.
 ///
 /// Dependencies: websocket-sharp (recommended) or NativeWebSocket.
 ///   • websocket-sharp: import via NuGet or drop the DLL into Assets/Plugins.
 ///   • NativeWebSocket:  https://github.com/endel/NativeWebSocket
 ///
-/// The script uses websocket-sharp by default.  If you prefer NativeWebSocket,
-/// swap the using directive and adjust the server bootstrap accordingly.
+/// ──────────────────────────────────────────────────────────────────────────
+///  HOW SIMULATED INPUT REACHES YOUR GAME
+/// ──────────────────────────────────────────────────────────────────────────
+/// The agent sends actions like {"action":"key_hold","key":"w","duration":1.0}.
+/// How your game "feels" them depends on which input backend you use:
+///
+///  1. NEW INPUT SYSTEM (com.unity.inputsystem)  — *drop-in*
+///     Compile with ENABLE_INPUT_SYSTEM (automatic when the package is
+///     installed). QABridge injects events through InputSystem, so your normal
+///     `Input.GetKey`, `InputAction`, and `PlayerInput` callbacks see them with
+///     NO code changes.
+///
+///  2. LEGACY INPUT MANAGER (UnityEngine.Input)  — *one-line change*
+///     Unity's legacy Input cannot be injected. Have your movement/input code
+///     read QABridge's simulated buffer instead of (or OR'd with) Input:
+///
+///         // before:  if (Input.GetKey(KeyCode.W))
+///         // after:   if (Input.GetKey(KeyCode.W) || QABridge.SimInput.GetKey(KeyCode.W))
+///
+///     Or centralise it with the QAInput helper at the bottom of this file:
+///         if (QAInput.GetKey(KeyCode.W)) { ... }   // real OR simulated
+///
+/// Mouse clicks are additionally dispatched via EventSystem + Physics raycasts,
+/// so UI buttons and world colliders react even without any code change.
 /// </summary>
 [AddComponentMenu("QA/QA Bridge")]
+[DefaultExecutionOrder(-10000)] // run before game scripts so SimInput is fresh
 public class QABridge : MonoBehaviour
 {
     // ─── Inspector ───────────────────────────────────────────────────
@@ -34,6 +60,10 @@ public class QABridge : MonoBehaviour
     [Tooltip("The player Transform whose position is reported.")]
     public Transform playerTransform;
 
+    // ─── Static access to simulated input ────────────────────────────
+    /// <summary>Query simulated input from your game code (legacy Input Manager).</summary>
+    public static SimulatedInput SimInput { get; private set; } = new SimulatedInput();
+
     // ─── Private state ───────────────────────────────────────────────
     private WebSocketSharp.Server.WebSocketServer _server;
     private float _nextBroadcast;
@@ -43,9 +73,6 @@ public class QABridge : MonoBehaviour
     // Cached component look-ups
     private Animator _playerAnimator;
     private Canvas[] _canvases;
-
-    // ─── Simulated input state ───────────────────────────────────────
-    private readonly Dictionary<KeyCode, float> _heldKeys = new Dictionary<KeyCode, float>();
 
     // ─── Lifecycle ───────────────────────────────────────────────────
 
@@ -61,13 +88,19 @@ public class QABridge : MonoBehaviour
         if (!enableBridge) return;
 
         ProcessIncomingActions();
-        TickHeldKeys();
+        SimInput.Tick();   // expire held keys, surface key-up events
 
         if (Time.time >= _nextBroadcast)
         {
             _nextBroadcast = Time.time + broadcastInterval;
             BroadcastGameState();
         }
+    }
+
+    private void LateUpdate()
+    {
+        // Clear one-frame edge flags after every script has read them this frame.
+        SimInput.EndFrame();
     }
 
     private void OnDestroy()
@@ -240,19 +273,28 @@ public class QABridge : MonoBehaviour
 
     private void ExecuteAction(string json)
     {
-        // Minimal JSON parsing without external dependency.
         var data = JsonUtility.FromJson<ActionPayload>(json);
 
         switch (data.action)
         {
             case "key_press":
-                SimulateKeyPress(data.key);
+                PressKey(data.key);
                 break;
             case "key_hold":
-                SimulateKeyHold(data.key, data.duration);
+                HoldKey(data.key, data.duration);
+                break;
+            case "key_release":
+                ReleaseKey(data.key);
+                break;
+            case "key_combo":
+                if (data.keys != null)
+                    foreach (var k in data.keys) PressKey(k);
                 break;
             case "mouse_click":
-                SimulateMouseClick(data.x, data.y);
+                MouseClick(data.x, data.y, data.button);
+                break;
+            case "mouse_move":
+                SimInput.SetMousePosition(data.x, data.y);
                 break;
             default:
                 Debug.LogWarning($"[QABridge] Unknown action: {data.action}");
@@ -260,56 +302,65 @@ public class QABridge : MonoBehaviour
         }
     }
 
-    private void SimulateKeyPress(string keyName)
+    // Tap: register the key for a few frames so GetKey and GetKeyDown both fire.
+    private void PressKey(string keyName)
     {
-        if (string.IsNullOrEmpty(keyName)) return;
-        Debug.Log($"[QABridge] key_press → {keyName}");
-        // Feed into Unity's Input system via a synthetic event or a custom input
-        // buffer that your game's input layer reads.  For the legacy Input Manager,
-        // the simplest approach is to set a flag that the movement script polls.
-        // For the new Input System, use InputSystem.QueueStateEvent.
+        if (!TryParseKey(keyName, out var kc)) return;
+        Debug.Log($"[QABridge] key_press -> {kc}");
+        SimInput.PressFor(kc, 0.06f);
+        InjectInputSystemKey(kc, true, autoRelease: true);
     }
 
-    private void SimulateKeyHold(string keyName, float duration)
+    private void HoldKey(string keyName, float duration)
     {
-        if (string.IsNullOrEmpty(keyName)) return;
-        Debug.Log($"[QABridge] key_hold → {keyName} for {duration}s");
-        KeyCode kc;
-        if (Enum.TryParse(keyName, true, out kc))
-        {
-            _heldKeys[kc] = Time.time + Mathf.Max(duration, 0.05f);
-        }
+        if (!TryParseKey(keyName, out var kc)) return;
+        Debug.Log($"[QABridge] key_hold -> {kc} for {duration}s");
+        SimInput.PressFor(kc, Mathf.Max(duration, 0.05f));
+        InjectInputSystemKey(kc, true, autoRelease: false, duration: Mathf.Max(duration, 0.05f));
     }
 
-    private void SimulateMouseClick(int x, int y)
+    private void ReleaseKey(string keyName)
     {
-        Debug.Log($"[QABridge] mouse_click → ({x}, {y})");
-        // Raycast from screen point and invoke IPointerClickHandler on hit UI, or
-        // Physics.Raycast for world objects.
-        var pointer = new UnityEngine.EventSystems.PointerEventData(
-            UnityEngine.EventSystems.EventSystem.current)
-        {
-            position = new Vector2(x, y)
-        };
-        var results = new List<UnityEngine.EventSystems.RaycastResult>();
-        UnityEngine.EventSystems.EventSystem.current.RaycastAll(pointer, results);
-        foreach (var r in results)
-        {
-            UnityEngine.EventSystems.ExecuteEvents.Execute(
-                r.gameObject,
-                pointer,
-                UnityEngine.EventSystems.ExecuteEvents.pointerClickHandler);
-        }
+        if (!TryParseKey(keyName, out var kc)) return;
+        Debug.Log($"[QABridge] key_release -> {kc}");
+        SimInput.Release(kc);
+        InjectInputSystemKey(kc, false);
     }
 
-    private void TickHeldKeys()
+    private void MouseClick(int x, int y, int button)
     {
-        var expired = new List<KeyCode>();
-        foreach (var kv in _heldKeys)
+        Debug.Log($"[QABridge] mouse_click -> ({x}, {y}) btn {button}");
+        SimInput.SetMousePosition(x, y);
+        SimInput.PressMouseFor(button, 0.06f);
+
+        // Also dispatch a real click so UI and world colliders react with no
+        // game-side code change.
+        var es = UnityEngine.EventSystems.EventSystem.current;
+        if (es != null)
         {
-            if (Time.time >= kv.Value) expired.Add(kv.Key);
+            var pointer = new UnityEngine.EventSystems.PointerEventData(es)
+            {
+                position = new Vector2(x, y)
+            };
+            var results = new List<UnityEngine.EventSystems.RaycastResult>();
+            es.RaycastAll(pointer, results);
+            foreach (var r in results)
+            {
+                UnityEngine.EventSystems.ExecuteEvents.Execute(
+                    r.gameObject, pointer,
+                    UnityEngine.EventSystems.ExecuteEvents.pointerClickHandler);
+            }
         }
-        foreach (var k in expired) _heldKeys.Remove(k);
+
+        if (Camera.main != null)
+        {
+            Ray ray = Camera.main.ScreenPointToRay(new Vector3(x, y, 0));
+            if (Physics.Raycast(ray, out var hit))
+            {
+                hit.collider.gameObject.SendMessage(
+                    "OnQAClick", hit, SendMessageOptions.DontRequireReceiver);
+            }
+        }
     }
 
     private void CacheReferences()
@@ -329,6 +380,100 @@ public class QABridge : MonoBehaviour
                 .Replace("\n", "\\n").Replace("\r", "\\r");
     }
 
+    // ─── Key name → KeyCode ──────────────────────────────────────────
+
+    /// <summary>Map an agent key name (pyautogui-style) to a Unity KeyCode.</summary>
+    private static bool TryParseKey(string name, out KeyCode kc)
+    {
+        kc = KeyCode.None;
+        if (string.IsNullOrEmpty(name)) return false;
+        string n = name.Trim().ToLowerInvariant();
+
+        // single letter a–z
+        if (n.Length == 1 && n[0] >= 'a' && n[0] <= 'z')
+            return Enum.TryParse(n.ToUpperInvariant(), out kc);
+        // single digit 0–9
+        if (n.Length == 1 && n[0] >= '0' && n[0] <= '9')
+            return Enum.TryParse("Alpha" + n, out kc);
+
+        switch (n)
+        {
+            case "space": kc = KeyCode.Space; return true;
+            case "enter":
+            case "return": kc = KeyCode.Return; return true;
+            case "esc":
+            case "escape": kc = KeyCode.Escape; return true;
+            case "tab": kc = KeyCode.Tab; return true;
+            case "backspace": kc = KeyCode.Backspace; return true;
+            case "delete":
+            case "del": kc = KeyCode.Delete; return true;
+            case "shift":
+            case "shiftleft": kc = KeyCode.LeftShift; return true;
+            case "shiftright": kc = KeyCode.RightShift; return true;
+            case "ctrl":
+            case "control":
+            case "ctrlleft": kc = KeyCode.LeftControl; return true;
+            case "alt":
+            case "altleft": kc = KeyCode.LeftAlt; return true;
+            case "up": kc = KeyCode.UpArrow; return true;
+            case "down": kc = KeyCode.DownArrow; return true;
+            case "left": kc = KeyCode.LeftArrow; return true;
+            case "right": kc = KeyCode.RightArrow; return true;
+        }
+        if (n.Length >= 2 && n[0] == 'f' && int.TryParse(n.Substring(1), out int fn) && fn >= 1 && fn <= 12)
+            return Enum.TryParse("F" + fn, out kc);
+
+        // Last resort: exact KeyCode name (e.g. "LeftShift").
+        return Enum.TryParse(name, true, out kc);
+    }
+
+    // ─── New Input System injection (optional) ───────────────────────
+
+    private static void InjectInputSystemKey(KeyCode kc, bool down,
+        bool autoRelease = false, float duration = 0f)
+    {
+#if ENABLE_INPUT_SYSTEM
+        var key = ToInputSystemKey(kc);
+        if (key == Key.None || Keyboard.current == null) return;
+        try
+        {
+            using (StateEvent.From(Keyboard.current, out var eventPtr))
+            {
+                Keyboard.current[key].WriteValueIntoEvent(down ? 1f : 0f, eventPtr);
+                InputSystem.QueueEvent(eventPtr);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[QABridge] Input System inject failed: {ex.Message}");
+        }
+#endif
+    }
+
+#if ENABLE_INPUT_SYSTEM
+    private static Key ToInputSystemKey(KeyCode kc)
+    {
+        if (kc >= KeyCode.A && kc <= KeyCode.Z)
+            return Key.A + (kc - KeyCode.A);
+        switch (kc)
+        {
+            case KeyCode.Space: return Key.Space;
+            case KeyCode.Return: return Key.Enter;
+            case KeyCode.Escape: return Key.Escape;
+            case KeyCode.Tab: return Key.Tab;
+            case KeyCode.LeftShift: return Key.LeftShift;
+            case KeyCode.RightShift: return Key.RightShift;
+            case KeyCode.LeftControl: return Key.LeftCtrl;
+            case KeyCode.LeftAlt: return Key.LeftAlt;
+            case KeyCode.UpArrow: return Key.UpArrow;
+            case KeyCode.DownArrow: return Key.DownArrow;
+            case KeyCode.LeftArrow: return Key.LeftArrow;
+            case KeyCode.RightArrow: return Key.RightArrow;
+            default: return Key.None;
+        }
+    }
+#endif
+
     // ─── Serialisation helpers ───────────────────────────────────────
 
     [Serializable]
@@ -336,10 +481,103 @@ public class QABridge : MonoBehaviour
     {
         public string action = "";
         public string key = "";
+        public string[] keys = null;
         public float duration = 0f;
         public int x = 0;
         public int y = 0;
+        public int button = 0;   // 0 = left, 1 = right, 2 = middle
     }
+
+    // ─── Simulated input buffer ──────────────────────────────────────
+
+    /// <summary>
+    /// Frame-accurate buffer of keys/mouse the agent is "holding". Read it from
+    /// your game code (legacy Input Manager) via <see cref="QABridge.SimInput"/>.
+    /// GetKey is the most reliable; GetKeyDown/Up are best-effort one-frame edges.
+    /// </summary>
+    public class SimulatedInput
+    {
+        private readonly Dictionary<KeyCode, float> _heldUntil = new Dictionary<KeyCode, float>();
+        private readonly HashSet<KeyCode> _down = new HashSet<KeyCode>();
+        private readonly HashSet<KeyCode> _up = new HashSet<KeyCode>();
+        private readonly Dictionary<int, float> _mouseUntil = new Dictionary<int, float>();
+        private readonly HashSet<int> _mouseDown = new HashSet<int>();
+
+        public Vector2 MousePosition { get; private set; }
+
+        public bool GetKey(KeyCode kc) =>
+            _heldUntil.TryGetValue(kc, out var t) && Time.time < t;
+        public bool GetKey(string name) =>
+            TryParseKey(name, out var kc) && GetKey(kc);
+        public bool GetKeyDown(KeyCode kc) => _down.Contains(kc);
+        public bool GetKeyUp(KeyCode kc) => _up.Contains(kc);
+        public bool GetMouseButton(int btn) =>
+            _mouseUntil.TryGetValue(btn, out var t) && Time.time < t;
+        public bool GetMouseButtonDown(int btn) => _mouseDown.Contains(btn);
+
+        internal void PressFor(KeyCode kc, float seconds)
+        {
+            if (!GetKey(kc)) _down.Add(kc);
+            _heldUntil[kc] = Time.time + seconds;
+        }
+
+        internal void Release(KeyCode kc)
+        {
+            if (_heldUntil.Remove(kc)) _up.Add(kc);
+        }
+
+        internal void PressMouseFor(int btn, float seconds)
+        {
+            if (!GetMouseButton(btn)) _mouseDown.Add(btn);
+            _mouseUntil[btn] = Time.time + seconds;
+        }
+
+        internal void SetMousePosition(int x, int y) => MousePosition = new Vector2(x, y);
+
+        internal void Tick()
+        {
+            // Expire held keys → surface key-up for this frame.
+            var expired = new List<KeyCode>();
+            foreach (var kv in _heldUntil)
+                if (Time.time >= kv.Value) expired.Add(kv.Key);
+            foreach (var k in expired) { _heldUntil.Remove(k); _up.Add(k); }
+
+            var expiredMouse = new List<int>();
+            foreach (var kv in _mouseUntil)
+                if (Time.time >= kv.Value) expiredMouse.Add(kv.Key);
+            foreach (var b in expiredMouse) _mouseUntil.Remove(b);
+        }
+
+        internal void EndFrame()
+        {
+            _down.Clear();
+            _up.Clear();
+            _mouseDown.Clear();
+        }
+    }
+}
+
+/// <summary>
+/// Drop-in helper: returns real OR simulated input. Replace `Input.GetKey(...)`
+/// with `QAInput.GetKey(...)` in your input layer to make the QA agent able to
+/// drive the game through the legacy Input Manager.
+/// </summary>
+public static class QAInput
+{
+    public static bool GetKey(KeyCode kc) =>
+        Input.GetKey(kc) || QABridge.SimInput.GetKey(kc);
+    public static bool GetKeyDown(KeyCode kc) =>
+        Input.GetKeyDown(kc) || QABridge.SimInput.GetKeyDown(kc);
+    public static bool GetKeyUp(KeyCode kc) =>
+        Input.GetKeyUp(kc) || QABridge.SimInput.GetKeyUp(kc);
+    public static bool GetMouseButton(int btn) =>
+        Input.GetMouseButton(btn) || QABridge.SimInput.GetMouseButton(btn);
+    public static bool GetMouseButtonDown(int btn) =>
+        Input.GetMouseButtonDown(btn) || QABridge.SimInput.GetMouseButtonDown(btn);
+    public static Vector3 mousePosition =>
+        QABridge.SimInput.MousePosition != Vector2.zero
+            ? (Vector3)QABridge.SimInput.MousePosition
+            : Input.mousePosition;
 }
 
 /// <summary>

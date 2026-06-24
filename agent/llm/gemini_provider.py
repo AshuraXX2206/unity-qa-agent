@@ -110,11 +110,20 @@ class GeminiProvider(LLMProvider):
             elif getattr(part, "text", ""):
                 text_parts.append(part.text)
 
+        usage: Dict[str, int] = {}
+        meta = getattr(resp, "usage_metadata", None)
+        if meta is not None:
+            usage = {
+                "input_tokens": getattr(meta, "prompt_token_count", 0) or 0,
+                "output_tokens": getattr(meta, "candidates_token_count", 0) or 0,
+            }
+
         stop_reason = "tool_use" if tool_calls else "end_turn"
         return LLMResponse(
             text="\n".join(text_parts).strip(),
             tool_calls=tool_calls,
             stop_reason=stop_reason,
+            usage=usage,
             raw=resp,
         )
 

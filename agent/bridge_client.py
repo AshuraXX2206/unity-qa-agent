@@ -64,8 +64,21 @@ class BridgeClient:
     def stop(self) -> None:
         """Gracefully shut down the client."""
         self._running = False
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._loop.stop)
+        loop = self._loop
+        if loop is not None:
+            # Close the socket on the still-running loop before stopping it, so
+            # websockets tears down cleanly (avoids "event loop is closed" noise).
+            async def _shutdown() -> None:
+                if self._ws is not None:
+                    try:
+                        await self._ws.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                loop.stop()
+            try:
+                asyncio.run_coroutine_threadsafe(_shutdown(), loop)
+            except Exception:  # noqa: BLE001 — loop already gone
+                loop.call_soon_threadsafe(loop.stop)
         if self._thread is not None:
             self._thread.join(timeout=5)
         self._connected = False

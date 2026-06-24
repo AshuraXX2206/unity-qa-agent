@@ -36,13 +36,26 @@ and mouse input through tools.
 Your job: investigate the goal below and determine whether the game behaves \
 correctly. Work in small steps — act, then observe the result before acting \
 again. Don't assume; verify with capture_screenshot and read_game_state.
-
+{persona}
 When you have enough evidence, call report_finding exactly once with your \
 verdict (PASS, FAIL, BUG, or INCONCLUSIVE) and stop. Be efficient — a handful \
 of well-chosen actions beats dozens of random ones.
 
 GOAL: {goal}
 """
+
+# How each persona should colour the agent's testing behaviour.
+_PERSONA_HINTS = {
+    "casual": "Play like a casual player: take the obvious path, don't overthink, "
+              "skip tutorials.",
+    "speedrunner": "Play like a speedrunner: take the fastest, most direct route; "
+                   "minimise wasted actions.",
+    "explorer": "Play like an explorer: try everything, poke at edges and optional "
+                "interactions, go off the beaten path.",
+    "griefer": "Play like a griefer trying to BREAK the game: attempt exploits, "
+               "out-of-bounds, spam inputs, illegal states, and edge cases. "
+               "Report any glitch or unexpected behaviour as a BUG.",
+}
 
 _DEFAULT_MAX_STEPS = 15
 
@@ -56,6 +69,7 @@ class AgentRunResult:
     steps: List[Dict[str, Any]] = field(default_factory=list)
     transcript: List[Dict[str, str]] = field(default_factory=list)
     stopped_reason: str = ""
+    total_tokens: int = 0
 
     @property
     def verdict(self) -> str:
@@ -68,6 +82,7 @@ class AgentRunResult:
             "model": self.model,
             "verdict": self.verdict,
             "stopped_reason": self.stopped_reason,
+            "total_tokens": self.total_tokens,
             "findings": [
                 {"verdict": f.verdict, "summary": f.summary, "details": f.details}
                 for f in self.findings
@@ -94,7 +109,7 @@ class QAAgent:
         self._on_event = on_event
 
     def run(self, goal: str) -> AgentRunResult:
-        system = _SYSTEM_PROMPT.format(goal=goal)
+        system = _SYSTEM_PROMPT.format(goal=goal, persona=self._persona_block())
         result = AgentRunResult(
             goal=goal, provider=self._provider_name, model=self._provider.model
         )
@@ -104,9 +119,27 @@ class QAAgent:
             {"role": "user", "content": self._observation("Initial game state:")}
         ]
 
+        try:
+            self._loop(system, messages, result)
+        except KeyboardInterrupt:
+            result.stopped_reason = "interrupted"
+            self._emit("error", "interrupted by user")
+
+        result.findings = list(self._ctx.findings)
+        result.steps = list(self._ctx.steps)
+        return result
+
+    def _loop(self, system: str, messages: List[Dict[str, Any]],
+              result: "AgentRunResult") -> None:
+        in_tok = out_tok = 0
         for step in range(self._max_steps):
             self._emit("step", {"step": step + 1, "max": self._max_steps})
             resp = self._provider.chat(system, messages, TOOL_SCHEMAS)
+            in_tok += resp.usage.get("input_tokens", 0)
+            out_tok += resp.usage.get("output_tokens", 0)
+            result.total_tokens = in_tok + out_tok
+            if resp.usage:
+                self._emit("usage", {"input": in_tok, "output": out_tok})
 
             if resp.text:
                 self._emit("thought", resp.text)
@@ -144,7 +177,8 @@ class QAAgent:
                 })
                 if tc.name in TERMINAL_TOOLS:
                     terminal = True
-                if tc.name in ("press_key", "hold_key", "mouse_click", "wait"):
+                if tc.name in ("press_key", "key_release", "key_combo",
+                               "mouse_click", "wait"):
                     acted = True
 
             messages.append({"role": "user", "content": tool_result_blocks})
@@ -168,10 +202,6 @@ class QAAgent:
                 })
         else:
             result.stopped_reason = "max_steps"
-
-        result.findings = list(self._ctx.findings)
-        result.steps = list(self._ctx.steps)
-        return result
 
     # ── helpers ────────────────────────────────────────────────────────
 
@@ -198,7 +228,16 @@ class QAAgent:
 
         return blocks
 
-    def _emit(self, kind: str, payload: str) -> None:
+    def _persona_block(self) -> str:
+        persona = self._ctx.persona
+        if persona is None:
+            return ""
+        hint = _PERSONA_HINTS.get(getattr(persona, "name", ""), "")
+        if not hint:
+            return ""
+        return f"\nPersona: {persona.name}. {hint}\n"
+
+    def _emit(self, kind: str, payload: Any) -> None:
         if self._on_event:
             try:
                 self._on_event(kind, payload)

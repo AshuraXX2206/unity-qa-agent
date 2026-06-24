@@ -71,23 +71,37 @@ class AnthropicProvider(LLMProvider):
             for t in tools
         ]
 
-        try:
-            resp = client.messages.create(
-                model=model,
-                max_tokens=4096,
-                system=system,
-                thinking={"type": "adaptive"},
-                tools=anthropic_tools,
-                messages=anthropic_messages,
-            )
-        except Exception as exc:  # noqa: BLE001 — surface as a turn, don't crash the loop
-            log.error("Anthropic chat failed: %s", exc)
-            return LLMResponse(text=f"[provider error: {exc}]", stop_reason="error")
+        in_tok = out_tok = 0
+        # Loop to transparently continue past pause_turn (server-tool iteration cap).
+        for _ in range(4):
+            try:
+                resp = client.messages.create(
+                    model=model,
+                    max_tokens=4096,
+                    system=system,
+                    thinking={"type": "adaptive"},
+                    tools=anthropic_tools,
+                    messages=anthropic_messages,
+                )
+            except Exception as exc:  # noqa: BLE001 — surface as a turn, don't crash the loop
+                log.error("Anthropic chat failed: %s", exc)
+                return LLMResponse(text=f"[provider error: {exc}]", stop_reason="error")
+
+            usage = getattr(resp, "usage", None)
+            if usage is not None:
+                in_tok += getattr(usage, "input_tokens", 0) or 0
+                out_tok += getattr(usage, "output_tokens", 0) or 0
+
+            if resp.stop_reason != "pause_turn":
+                break
+            # Resume: feed the paused assistant turn back and continue.
+            anthropic_messages.append({"role": "assistant", "content": resp.content})
 
         if resp.stop_reason == "refusal":
             return LLMResponse(
                 text="[model refused this request]",
                 stop_reason="refusal",
+                usage={"input_tokens": in_tok, "output_tokens": out_tok},
                 raw=resp,
             )
 
@@ -103,6 +117,7 @@ class AnthropicProvider(LLMProvider):
             text="\n".join(text_parts).strip(),
             tool_calls=tool_calls,
             stop_reason=resp.stop_reason or "",
+            usage={"input_tokens": in_tok, "output_tokens": out_tok},
             raw=resp,
         )
 

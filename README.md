@@ -1,216 +1,177 @@
 # Unity QA Agent
 
-AI-powered QA agent that automatically tests Unity games. Install once, type `qagent` from anywhere.
+An AI agent that **plays and tests your Unity game**. Give it a goal in plain
+language — *"check the player can jump"* — and it observes the screen, reads
+game state, sends input, watches what happens, and reports a verdict. Install
+once, type `qagent` from anywhere.
+
+```
+qagent agent "check that pressing W moves the player forward"
+```
+
+## Two modes
+
+| Mode | Command | What it is |
+|---|---|---|
+| **Agentic** (default) | `qagent agent "<goal>"` | An LLM autonomously drives the game in an observe → reason → act loop, like Claude Code for QA. |
+| **Scripted** | `qagent run --suite x.yaml` | Deterministic YAML test suites with rule-based verification (the classic flow). |
 
 ## Features
 
-- **One-command install** — `pip install .` registers `qagent` as a global CLI command.
-- **Setup wizard** — First run guides you through API key, model, and project configuration.
-- **Interactive TUI** — Claude Code-style interface with streaming spinners, syntax highlighting, and rich tables.
-- **WebSocket Bridge** — C# Unity plugin streams game state JSON; Python agent sends input commands back.
-- **Codebase Analysis** — Reads your Unity C# source files to detect input bindings, game patterns, and auto-generate test cases.
-- **Screen Capture & OCR** — `mss` + `pytesseract` for reading on-screen text; OpenCV template matching for UI element detection.
-- **Simulated Input** — `pyautogui` drives keyboard and mouse as if a real player is testing.
-- **YAML Test Suites** — Declarative test cases with multiple verification types.
-- **AI Verification** — Gemini (default, free tier) or Claude vision for complex checks.
-- **Persona Profiles** — Casual, speedrunner, explorer, griefer — each with different timing and behaviour.
-- **Rich Reports** — Coloured console output + JSON files for CI integration.
-
----
-
-## Prerequisites
-
-| Requirement | Version | Notes |
-|---|---|---|
-| Python | 3.11+ | 3.12 recommended |
-| Unity | 2022.3+ | Any render pipeline |
-| Tesseract OCR | 5.x | [Install guide](https://github.com/tesseract-ocr/tesseract#installing-tesseract) |
-| websocket-sharp **or** NativeWebSocket | latest | Unity WebSocket library (see Unity Setup) |
-
-### Install Tesseract OCR
-
-**Windows** — download installer from <https://github.com/UB-Mannheim/tesseract/wiki> and add to PATH.
-
-**macOS** — `brew install tesseract`
-
-**Linux** — `sudo apt-get install -y tesseract-ocr`
+- **One-command install** — `pip install -e .` registers `qagent` globally.
+- **Autonomous agent** — LLM with vision + tool use drives the game and decides what to test next; live multi-panel dashboard shows its thoughts, actions, and findings in real time.
+- **Bring any free-tier key** — Gemini, Groq, OpenRouter, Cerebras, Mistral, Together (and Anthropic). One provider abstraction; add any OpenAI-compatible host with a base URL.
+- **Auto-updating model** — the agent queries the provider's `/models` endpoint at runtime and picks the newest vision+tools model. No hardcoded model ids to go stale.
+- **Two input backends** — drive Unity over the **WebSocket bridge** (no focused window needed) or via **OS input** (pyautogui).
+- **Screen + state observation** — WebSocket game-state JSON, screen capture, OCR (Tesseract), and OpenCV template matching.
+- **Personas** — casual, speedrunner, explorer, griefer — each shapes how the agent tests (griefer actively tries to break the game).
+- **Rich reports** — console panels + JSON files for CI.
 
 ---
 
 ## Quick Start
 
 ```bash
-# 1. Clone & install
+# 1. Clone & install (editable so code updates are picked up automatically)
 git clone https://github.com/AshuraXX2206/unity-qa-agent.git
 cd unity-qa-agent
-pip install .
+pip install -e .          # or: py -m pip install -e .   (Windows launcher)
 
-# 2. Launch (first run opens setup wizard)
-qagent
+# 2. Configure (provider + free API key)
+qagent setup
+
+# 3. Run the agent
+qagent agent "check the player can move and jump"
 ```
 
-The setup wizard will ask for:
-1. **AI Provider** — Gemini (free tier) or Anthropic (Claude)
-2. **API Key** — get one at https://aistudio.google.com/apikey
-3. **AI Model** — gemini-2.5-flash recommended
-4. **Unity project path** — for codebase analysis
-5. **Default persona** — casual, speedrunner, explorer, or griefer
-6. **WebSocket URL** — defaults to ws://localhost:8765
+> **Windows PATH note:** pip installs `qagent.exe` into your Python's `Scripts`
+> directory. If `qagent` isn't found, add that folder to PATH (the install log
+> prints its location), then open a new terminal.
 
-Settings are saved to `~/.qagent/config.yaml` and persist across sessions.
+The setup wizard asks for:
+1. **AI provider** — Gemini / Groq / OpenRouter / Cerebras / Mistral / Together / Anthropic
+2. **API key** — it shows where to get a free one
+3. **Model** — leave as `auto` (newest discovered at runtime) or pin one
+4. **Unity project path**, **default persona**, **WebSocket URL**
 
-### Alternative: Virtual Environment
+Settings persist in `~/.qagent/config.yaml`.
+
+---
+
+## Commands
 
 ```bash
-python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# macOS / Linux
-source .venv/bin/activate
-pip install .
-qagent
+qagent                                   # interactive REPL
+qagent agent "<goal>"                    # autonomous QA agent
+qagent agent "<goal>" --persona griefer  # test as a griefer (tries to break things)
+qagent agent "<goal>" --input bridge     # drive Unity via the WebSocket bridge
+qagent agent "<goal>" --no-bridge --safe-mode   # vision/OCR only, log input without sending
+qagent models                            # list models the provider offers (+ which 'auto' picks)
+qagent run --suite test_cases/basic_movement.yaml --persona casual
+qagent list --suite test_cases/basic_movement.yaml
+qagent validate --suite test_cases/basic_movement.yaml
+qagent analyze --path /path/to/Assets/Scripts     # detect input bindings & patterns
+qagent generate --path /path/to/Assets/Scripts    # auto-generate a YAML suite
+qagent setup                             # re-run the wizard
+qagent config                            # view config
 ```
+
+### `agent` flags
+
+| Flag | Meaning |
+|---|---|
+| `--persona <name>` | casual / speedrunner / explorer / griefer |
+| `--input {auto,bridge,os}` | input backend (default `auto`: bridge if connected, else OS) |
+| `--max-steps N` | cap on agent tool-calling steps (default 15) |
+| `--safe-mode` | log input actions without executing them |
+| `--no-bridge` | skip the Unity bridge (observe via screen capture / OCR only) |
 
 ---
 
 ## Unity Setup
 
 1. **Import a WebSocket library** into your Unity project:
-   - **websocket-sharp** (recommended): add via NuGet or drop `websocket-sharp.dll` into `Assets/Plugins/`.
-   - **NativeWebSocket**: <https://github.com/endel/NativeWebSocket> — install via Unity Package Manager (git URL).
+   - **websocket-sharp** (recommended): NuGet, or drop `websocket-sharp.dll` into `Assets/Plugins/`.
+   - **NativeWebSocket**: <https://github.com/endel/NativeWebSocket>.
 
-2. **Copy** `unity-bridge/QABridge.cs` into your Unity project (e.g. `Assets/Scripts/QA/`).
+2. **Copy** `unity-bridge/QABridge.cs` into your project (e.g. `Assets/Scripts/QA/`).
 
-3. **Create an empty GameObject** in your scene, name it `QABridge`, and attach the `QABridge` component.
+3. **Create an empty GameObject** named `QABridge`, attach the `QABridge` component, set `Player Transform` (or tag your player `Player`).
 
-4. **Configure** in the Inspector:
-   - `Enable Bridge` — toggle on/off.
-   - `Port` — default `8765`.
-   - `Broadcast Interval` — how often game state is sent (seconds).
-   - `Player Transform` — drag your player GameObject here (auto-detected via `Player` tag if left empty).
+4. **Press Play** — the console prints `[QABridge] WebSocket server started on port 8765`.
 
-5. **Press Play** in the Unity Editor — the console should print `[QABridge] WebSocket server started on port 8765`.
+### Making the agent's input reach your game
 
----
+The bridge receives actions like `{"action":"key_hold","key":"w","duration":1}`.
+How your game *feels* them depends on your input backend:
 
-## Running Tests
-
-```bash
-# Interactive mode (recommended)
-qagent
-
-# Run a full test suite
-qagent run --suite test_cases/basic_movement.yaml --persona casual
-
-# Run a single test case
-qagent run --suite test_cases/basic_movement.yaml --id TC001
-
-# Screen-capture-only mode (no Unity bridge required)
-qagent run --suite test_cases/ui_flow.yaml --no-bridge
-
-# Safe mode — log actions without actually executing input
-qagent run --suite test_cases/basic_movement.yaml --safe-mode
-
-# List all test cases in a suite
-qagent list --suite test_cases/basic_movement.yaml
-
-# Validate YAML syntax
-qagent validate --suite test_cases/basic_movement.yaml
-
-# Analyze Unity codebase and detect test opportunities
-qagent analyze --path /path/to/unity/Assets/Scripts
-
-# Auto-generate test cases from codebase analysis
-qagent generate --path /path/to/unity/Assets/Scripts --output test_cases/auto.yaml
-
-# Re-run setup wizard
-qagent setup
-
-# View current config
-qagent config
-```
-
-### Personas
-
-| Persona | Delay | Randomness | Description |
-|---|---|---|---|
-| `casual` | 0.5s | 30% | Skips tutorials, rushes into action |
-| `speedrunner` | 0.05s | 0% | Optimises every action for speed |
-| `explorer` | 0.3s | 10% | Tries everything, goes everywhere |
-| `griefer` | 0.05s | 80% | Tries to break the game |
+- **New Input System** (`com.unity.inputsystem`) — **drop-in**. `QABridge` injects
+  events through `InputSystem`, so your normal `Input.GetKey` / `InputAction` /
+  `PlayerInput` see simulated input with **no code changes**.
+- **Legacy Input Manager** — Unity's legacy `Input` can't be injected. Read the
+  bridge's simulated buffer in your input code:
+  ```csharp
+  // before:  if (Input.GetKey(KeyCode.W))
+  // after:   if (QAInput.GetKey(KeyCode.W))     // real OR simulated
+  ```
+  `QAInput` (shipped in `QABridge.cs`) returns real-or-simulated input. Mouse
+  clicks are additionally dispatched via `EventSystem` + `Physics.Raycast`, so UI
+  buttons and world colliders react without any change.
 
 ---
 
-## Writing Test Cases
+## Personas
 
-Test cases are YAML files in `test_cases/`. Each file defines a **suite** containing one or more cases.
+| Persona | Behaviour |
+|---|---|
+| `casual` | Obvious path, skips tutorials |
+| `speedrunner` | Fastest, most direct route |
+| `explorer` | Tries everything, pokes at edges |
+| `griefer` | Actively tries to break the game; reports glitches as BUGs |
 
-### Schema
+In agentic mode the persona is injected into the agent's system prompt, shaping
+how it explores. In scripted mode it controls input timing and randomness.
+
+---
+
+## Scripted Test Suites (YAML)
+
+Test cases live in `test_cases/`. Each file defines a **suite**.
 
 ```yaml
-test_suite: "Suite Name"           # required
-description: "What this suite tests"
+test_suite: "Basic Movement"
 setup:
-  scene: "SceneName"               # expected Unity scene
-  wait_for_load: 2.0               # seconds to wait before first test
-
+  scene: "Level_01"
+  wait_for_load: 2.0
 test_cases:
-  - id: "TC001"                    # unique identifier
-    name: "Human-readable name"
-    description: "What is being tested"
-    ai_verify: false               # set true to use LLM verification
-    steps:                         # actions to perform
+  - id: "TC001"
+    name: "Move Forward"
+    steps:
       - action: key_press
         key: "w"
-        duration: 1.0              # hold duration (optional)
-      - action: mouse_click
-        x: 540
-        y: 300
-        button: "left"
-      - action: wait
-        duration: 0.5
-    verify:                        # conditions to check
+        duration: 1.0
+    verify:
       - type: game_state
         field: "player.position.z"
-        operator: "greater_than"   # equals | not_equals | greater_than | less_than | gte | lte
+        operator: "greater_than"
         expected: 0.5
         tolerance: 0.1
-        timeout: 5.0
 ```
 
-### Action Types
+**Actions:** `key_press`, `key_hold`, `key_combo`, `mouse_click`, `mouse_move`,
+`mouse_drag`, `type_text`, `scroll`, `wait`.
 
-| Action | Parameters | Description |
-|---|---|---|
-| `key_press` | `key`, `duration` (opt) | Press/hold a key |
-| `key_hold` | `key`, `duration` | Hold a key for N seconds |
-| `key_combo` | `keys` (list) | Press key combination |
-| `mouse_click` | `x`, `y`, `button` | Click at screen position |
-| `mouse_move` | `x`, `y`, `duration` | Move cursor smoothly |
-| `mouse_drag` | `x1`, `y1`, `x2`, `y2` | Drag from A to B |
-| `type_text` | `text` | Type a string |
-| `scroll` | `x`, `y`, `amount` | Scroll mouse wheel |
-| `wait` | `duration` | Pause between steps |
-
-### Verification Types
-
-| Type | Fields | Description |
-|---|---|---|
-| `game_state` | `field`, `operator`, `expected`, `tolerance` | Compare a dotted path in the game state JSON |
-| `animation` | `field`, `expected` | Check current animation name |
-| `ui_active` | `element` | Check if a UI element is in the `activeUI` list |
-| `screen_text` | `contains` | OCR the screen and search for text |
-| `screen_image` | `template`, `confidence` | OpenCV template matching |
+**Verification types:** `game_state` (dotted JSON path + operator + tolerance),
+`animation`, `ui_active`, `screen_text` (OCR), `screen_image` (template match).
 
 ---
 
 ## Reports
 
-After each run the agent produces:
-
-1. **Console output** — a rich table with pass/fail per test case.
-2. **JSON file** — `reports/report_<timestamp>.json` with full details.
-3. **Screenshots** — `reports/screenshots/<TC_ID>_before_*.png` and `..._after_*.png`.
+After each run the agent writes:
+- **Console** — rich panels (agentic: verdict + activity log; scripted: pass/fail table).
+- **JSON** — `reports/agent_report_<ts>.json` or `reports/report_<ts>.json`.
+- **Screenshots** — `reports/screenshots/`.
 
 ---
 
@@ -218,57 +179,53 @@ After each run the agent produces:
 
 ```
 unity-qa-agent/
-├── unity-bridge/
-│   └── QABridge.cs              # C# Unity WebSocket server plugin
+├── unity-bridge/QABridge.cs        # C# bridge: state broadcast + simulated input
 ├── agent/
-│   ├── __init__.py
-│   ├── __main__.py              # python -m agent entrypoint
-│   ├── main.py                  # CLI (argparse)
-│   ├── bridge_client.py         # Async WebSocket client
-│   ├── screen_observer.py       # Screen capture + OCR + template matching
-│   ├── input_executor.py        # pyautogui wrapper with safe mode
-│   ├── test_runner.py           # YAML loading, step execution, verification
-│   ├── ai_verifier.py           # Claude vision verification
-│   ├── persona.py               # Behaviour profiles
-│   └── report_generator.py      # Rich console + JSON reports
-├── test_cases/
-│   ├── basic_movement.yaml      # 7 movement test cases
-│   ├── combat_system.yaml       # 7 combat test cases
-│   └── ui_flow.yaml             # 7 UI test cases
-├── reports/                     # Generated reports (gitignored)
-├── requirements.txt
-├── .env.example
-└── README.md
+│   ├── main.py                     # CLI + interactive REPL
+│   ├── qa_agent.py                 # agentic observe→reason→act loop
+│   ├── agent_tools.py              # tools the agent calls (screenshot, input, …)
+│   ├── llm/                        # provider abstraction
+│   │   ├── base.py                 #   neutral interface + types
+│   │   ├── anthropic_provider.py   #   Claude (native SDK)
+│   │   ├── gemini_provider.py      #   Gemini (native SDK)
+│   │   ├── openai_compat_provider.py  # Groq/OpenRouter/Cerebras/Mistral/Together
+│   │   └── registry.py             #   known providers + factory
+│   ├── model_selector.py           # auto-pick newest model via /models
+│   ├── bridge_client.py            # async WebSocket client (read state / send input)
+│   ├── bridge_input.py             # InputExecutor that drives Unity over the bridge
+│   ├── input_executor.py           # OS input via pyautogui
+│   ├── screen_observer.py          # capture + OCR + template matching
+│   ├── test_runner.py              # scripted YAML execution
+│   ├── persona.py                  # behaviour profiles
+│   ├── report_generator.py         # console + JSON reports
+│   ├── tui.py                      # banner + live AgentDashboard
+│   ├── config.py / setup_wizard.py # ~/.qagent/config.yaml
+│   └── code_reader.py              # C# analysis → test suggestions
+├── test_cases/                     # YAML suites
+└── tests/                          # pytest suite (providers, agent loop, bridge round-trip)
 ```
+
+---
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest tests/ -q
+```
+
+`tests/test_bridge_loop.py` stands up a fake `QABridge` WebSocket server and
+verifies the full read-state / send-action loop without needing Unity.
 
 ---
 
 ## Troubleshooting
 
-### WebSocket won't connect
-
-- Ensure the Unity Editor is running and you pressed **Play**.
-- Confirm `QABridge` component is enabled in the Inspector.
-- Check the port (`8765` by default) isn't blocked by a firewall.
-- The Python client retries every 3 seconds up to 10 times, then falls back to screen-capture-only mode.
-
-### OCR not reading text
-
-- Verify Tesseract is installed and on your PATH: `tesseract --version`.
-- Game fonts with heavy effects (glow, outline, shadow) reduce OCR accuracy — consider the `screen_image` template-matching verification type instead.
-- Increase the `timeout` in the verify clause to give the text time to appear.
-
-### pyautogui not clicking the right place
-
-- The agent uses absolute screen coordinates — if Unity isn't running full-screen or the window moved, coordinates will be off.
-- Use `--safe-mode` to log actions without executing them for debugging.
-
-### AI verifier errors
-
-- Ensure `ANTHROPIC_API_KEY` is set in `.env`.
-- The verifier is only called when `ai_verify: true` is set on a test case or when rule-based checks are ambiguous.
-
----
+- **`qagent` not found** — the Python `Scripts` dir isn't on PATH; add it and open a new terminal.
+- **No model / "could not discover"** — set a provider key via `qagent setup`; check `qagent models`.
+- **Bridge won't connect** — ensure Unity is in Play mode, `QABridge` enabled, port `8765` open. The client retries, then falls back to screen-only mode.
+- **Agent input does nothing in-game** — wire `QAInput` (legacy Input Manager) or confirm the New Input System package is installed; or use `--input os`.
+- **OCR misses text** — verify `tesseract --version`; heavy font effects reduce accuracy — prefer `screen_image` template matching.
 
 ## License
 

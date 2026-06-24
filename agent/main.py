@@ -22,7 +22,7 @@ import signal
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from dotenv import load_dotenv
 from rich.console import Console
@@ -131,6 +131,9 @@ def cmd_interactive(args: argparse.Namespace) -> None:
         elif command == "status":
             _show_status(cfg)
 
+        elif command == "models":
+            _show_models(cfg)
+
         elif command == "setup":
             cfg = run_setup_wizard(cfg)
 
@@ -141,7 +144,7 @@ def cmd_interactive(args: argparse.Namespace) -> None:
             tui.agent_message(
                 f"Unknown command: **{command}**\n\n"
                 "Available commands: `agent`, `run`, `list`, `validate`, `analyze`, "
-                "`generate`, `personas`, `suites`, `status`, `help`, `exit`"
+                "`generate`, `personas`, `suites`, `models`, `status`, `help`, `exit`"
             )
 
 
@@ -158,6 +161,7 @@ def _show_interactive_help() -> None:
         "| `generate <path>` | Auto-generate test cases from code |\n"
         "| `personas` | Show available persona profiles |\n"
         "| `suites` | List available test suites |\n"
+        "| `models` | List models from the configured provider |\n"
         "| `status` | Show agent & connection status |\n"
         "| `config` | View current configuration |\n"
         "| `setup` | Re-run the setup wizard |\n"
@@ -179,11 +183,13 @@ def _interactive_agent(goal: str, ns: argparse.Namespace,
         return
     no_bridge = getattr(ns, "no_bridge", False)
     safe_mode = getattr(ns, "safe_mode", False)
-    _execute_agent(goal, cfg, no_bridge=no_bridge, safe_mode=safe_mode)
+    input_mode = getattr(ns, "input", "auto")
+    _execute_agent(goal, cfg, no_bridge=no_bridge, safe_mode=safe_mode, input_mode=input_mode)
 
 
 def _execute_agent(goal: str, cfg: Optional[Config], no_bridge: bool = False,
-                   safe_mode: bool = False, max_steps: int = 15) -> None:
+                   safe_mode: bool = False, max_steps: int = 15,
+                   input_mode: str = "auto") -> None:
     """Run the autonomous QA agent against a natural-language goal."""
     global _bridge
 
@@ -237,7 +243,23 @@ def _execute_agent(goal: str, cfg: Optional[Config], no_bridge: bool = False,
 
     persona = get_persona(cfg["default_persona"] if cfg else "casual")
     observer = ScreenObserver()
-    executor = InputExecutor(safe_mode=safe_mode, action_delay=persona.input_delay)
+
+    # Pick the input backend: bridge (drive Unity over WebSocket) vs OS (pyautogui).
+    use_bridge_input = (
+        input_mode in ("bridge", "auto")
+        and bridge is not None and bridge.connected
+    )
+    if input_mode == "bridge" and not use_bridge_input:
+        tui.warning_message("Bridge input requested but bridge not connected — using OS input")
+    if use_bridge_input:
+        from agent.bridge_input import BridgeInputExecutor
+        executor: Any = BridgeInputExecutor(
+            bridge, safe_mode=safe_mode, action_delay=persona.input_delay
+        )
+        tui.system_message("Input backend: Unity bridge")
+    else:
+        executor = InputExecutor(safe_mode=safe_mode, action_delay=persona.input_delay)
+        tui.system_message("Input backend: OS (pyautogui)")
 
     ctx = ToolContext(
         observer=observer, executor=executor, bridge=bridge, persona=persona,
@@ -545,10 +567,10 @@ def _show_available_suites() -> None:
 
 def _show_status(cfg: Optional[Config] = None) -> None:
     bridge_status = "[green]Connected[/]" if (_bridge and _bridge.connected) else "[red]Disconnected[/]"
-    provider = cfg.ai_provider if cfg else "unknown"
-    has_key = bool(cfg.api_key) if cfg else bool(os.getenv("GEMINI_API_KEY") or os.getenv("ANTHROPIC_API_KEY"))
+    provider = cfg.provider_name if cfg else "unknown"
+    has_key = bool(cfg.agent_api_key) if cfg else False
     key_status = "[green]Set[/]" if has_key else "[yellow]Not set[/]"
-    model = cfg.model if cfg else "—"
+    model = cfg.agent_model if cfg else "—"
 
     from rich.table import Table
     table = Table(title="Agent Status", border_style="cyan", show_header=False)
@@ -556,7 +578,7 @@ def _show_status(cfg: Optional[Config] = None) -> None:
     table.add_column("Status")
     table.add_row("Unity Bridge", bridge_status)
     table.add_row("AI Provider", provider.title())
-    table.add_row("AI Model", model)
+    table.add_row("AI Model", model + (" [dim](auto)[/]" if model == "auto" else ""))
     table.add_row("API Key", key_status)
     table.add_row("Default Persona", cfg["default_persona"] if cfg else "casual")
     table.add_row("Unity Project", cfg.unity_project_path or "[dim]not set[/]" if cfg else "—")
@@ -566,6 +588,59 @@ def _show_status(cfg: Optional[Config] = None) -> None:
 
     console.print()
     console.print(table)
+    console.print()
+
+
+def _show_models(cfg: Optional[Config] = None) -> None:
+    """Query the active provider's /models endpoint and list what's available."""
+    cfg = cfg or Config()
+    if not cfg.agent_api_key:
+        tui.error_message(
+            f"No API key for provider '{cfg.provider_name}'. Run `setup` first."
+        )
+        return
+    try:
+        provider = make_provider(
+            cfg.provider_name, api_key=cfg.agent_api_key, base_url=cfg.base_url
+        )
+    except Exception as exc:  # noqa: BLE001
+        tui.error_message(f"Could not init provider: {exc}")
+        return
+
+    with tui.thinking(f"Querying {cfg.provider_name} /models"):
+        try:
+            models = provider.list_models()
+        except Exception as exc:  # noqa: BLE001
+            models = []
+            err = str(exc)
+        else:
+            err = ""
+    if err:
+        tui.error_message(f"Failed to list models: {err}")
+        return
+    if not models:
+        tui.warning_message("Provider returned no models.")
+        return
+
+    models.sort(key=lambda m: m.sort_key(), reverse=True)
+    newest = select_newest_model(provider, prefer_vision=True)
+
+    from rich.table import Table
+    table = Table(title=f"Models — {cfg.provider_name}", border_style="cyan")
+    table.add_column("Model ID", style="bold")
+    table.add_column("Vision", justify="center")
+    table.add_column("Tools", justify="center")
+    table.add_column("", style="green")
+    for m in models[:40]:
+        table.add_row(
+            m.id,
+            "[green]yes[/]" if m.supports_vision else "[dim]no[/]",
+            "[green]yes[/]" if m.supports_tools else "[dim]no[/]",
+            "<- auto-selected" if m.id == newest else "",
+        )
+    console.print()
+    console.print(table)
+    console.print(f"  [dim]'auto' would pick:[/] [bold]{newest}[/]")
     console.print()
 
 
@@ -627,6 +702,7 @@ def cmd_agent(args: argparse.Namespace) -> None:
         no_bridge=getattr(args, "no_bridge", False),
         safe_mode=getattr(args, "safe_mode", False),
         max_steps=getattr(args, "max_steps", 15),
+        input_mode=getattr(args, "input", "auto"),
     )
     sys.exit(0)
 
@@ -641,6 +717,15 @@ def cmd_config(args: argparse.Namespace) -> None:
     """Show configuration."""
     cfg = Config()
     _show_config(cfg)
+
+
+def cmd_models(args: argparse.Namespace) -> None:
+    """List models from the configured provider's /models endpoint."""
+    load_dotenv()
+    cfg = Config()
+    tui.print_banner()
+    _show_models(cfg)
+    sys.exit(0)
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -691,6 +776,9 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Log actions without executing them")
     agent_p.add_argument("--max-steps", type=int, default=15,
                          help="Max agent tool-calling steps (default: 15)")
+    agent_p.add_argument("--input", choices=["auto", "bridge", "os"], default="auto",
+                         help="Input backend: bridge (Unity WebSocket), os (pyautogui), "
+                              "or auto (bridge if connected; default)")
     agent_p.set_defaults(func=cmd_agent)
 
     # run
@@ -736,6 +824,10 @@ def build_parser() -> argparse.ArgumentParser:
     # config
     config_p = sub.add_parser("config", help="View current configuration")
     config_p.set_defaults(func=cmd_config)
+
+    # models
+    models_p = sub.add_parser("models", help="List models from the configured provider")
+    models_p.set_defaults(func=cmd_models)
 
     return parser
 

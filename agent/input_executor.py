@@ -62,6 +62,13 @@ class InputExecutor:
             time.sleep(duration)
         self._delay()
 
+    def release_key(self, key: str) -> None:
+        """Release a key that is being held down."""
+        log.debug("release_key(%s)", key)
+        if not self.safe_mode:
+            pyautogui.keyUp(key)
+        self._delay()
+
     def press_combo(self, *keys: str) -> None:
         """Press a key combination (e.g. ``press_combo('ctrl', 'c')``)."""
         log.debug("press_combo(%s)", "+".join(keys))
