@@ -29,13 +29,17 @@ from rich.console import Console
 from rich.logging import RichHandler
 
 from agent import tui
+from agent.agent_tools import ToolContext
 from agent.ai_verifier import AIVerifier
 from agent.bridge_client import BridgeClient
 from agent.code_reader import CodeReader
 from agent.config import Config
 from agent.gemini_verifier import GeminiVerifier
 from agent.input_executor import InputExecutor
+from agent.llm.registry import PROVIDERS, make_provider
+from agent.model_selector import select_newest_model
 from agent.persona import get_persona, PERSONAS
+from agent.qa_agent import QAAgent
 from agent.report_generator import ReportGenerator
 from agent.screen_observer import ScreenObserver
 from agent.setup_wizard import run_setup_wizard
@@ -100,6 +104,9 @@ def cmd_interactive(args: argparse.Namespace) -> None:
         elif command == "help":
             _show_interactive_help()
 
+        elif command == "agent":
+            _interactive_agent(raw[len("agent"):].strip(), args, cfg)
+
         elif command == "run":
             _interactive_run(cmd[1:], args, cfg)
 
@@ -133,7 +140,7 @@ def cmd_interactive(args: argparse.Namespace) -> None:
         else:
             tui.agent_message(
                 f"Unknown command: **{command}**\n\n"
-                "Available commands: `run`, `list`, `validate`, `analyze`, "
+                "Available commands: `agent`, `run`, `list`, `validate`, `analyze`, "
                 "`generate`, `personas`, `suites`, `status`, `help`, `exit`"
             )
 
@@ -143,7 +150,8 @@ def _show_interactive_help() -> None:
         "## Available Commands\n\n"
         "| Command | Description |\n"
         "|---------|-------------|\n"
-        "| `run <suite.yaml>` | Execute a test suite |\n"
+        "| `agent <goal>` | Autonomous AI agent tests a goal (Claude-Code style) |\n"
+        "| `run <suite.yaml>` | Execute a scripted YAML test suite |\n"
         "| `list <suite.yaml>` | List test cases in a suite |\n"
         "| `validate <suite.yaml>` | Validate YAML syntax |\n"
         "| `analyze <path>` | Analyze Unity C# codebase |\n"
@@ -160,6 +168,95 @@ def _show_interactive_help() -> None:
         "- Add `--safe-mode` to `run` to log without executing\n"
         "- Add `--no-bridge` to `run` for screen-capture-only mode"
     )
+
+
+def _interactive_agent(goal: str, ns: argparse.Namespace,
+                       cfg: Optional[Config] = None) -> None:
+    if not goal:
+        goal = tui.prompt_input("What should the agent test?")
+    if not goal:
+        tui.error_message("No goal provided.")
+        return
+    no_bridge = getattr(ns, "no_bridge", False)
+    safe_mode = getattr(ns, "safe_mode", False)
+    _execute_agent(goal, cfg, no_bridge=no_bridge, safe_mode=safe_mode)
+
+
+def _execute_agent(goal: str, cfg: Optional[Config], no_bridge: bool = False,
+                   safe_mode: bool = False, max_steps: int = 15) -> None:
+    """Run the autonomous QA agent against a natural-language goal."""
+    global _bridge
+
+    cfg = cfg or Config()
+    provider_name = cfg.provider_name
+    api_key = cfg.agent_api_key
+    if not api_key:
+        tui.error_message(
+            f"No API key for provider '{provider_name}'. Run `setup` or set the "
+            f"provider's env var."
+        )
+        return
+
+    # Build provider + auto-select newest model.
+    try:
+        provider = make_provider(
+            provider_name, api_key=api_key, model="", base_url=cfg.base_url
+        )
+    except Exception as exc:  # noqa: BLE001
+        tui.error_message(f"Could not init provider '{provider_name}': {exc}")
+        return
+
+    configured = cfg.agent_model
+    if configured and configured != "auto":
+        provider.model = configured
+    else:
+        with tui.thinking("Discovering newest model"):
+            model = select_newest_model(provider, prefer_vision=True)
+        if not model:
+            tui.error_message("Could not discover a model and none is pinned in config.")
+            return
+        provider.model = model
+
+    tui.success_message(f"Using {provider_name} / {provider.model}")
+
+    # Bridge (optional).
+    bridge = None
+    if not no_bridge:
+        ws_url = cfg.get("unity_ws_url", "ws://localhost:8765")
+        bridge = BridgeClient(url=ws_url)
+        _bridge = bridge
+        with tui.thinking("Connecting to Unity bridge"):
+            bridge.start()
+            deadline = time.monotonic() + 5
+            while not bridge.connected and time.monotonic() < deadline:
+                time.sleep(0.3)
+        if bridge.connected:
+            tui.success_message("Connected to Unity bridge")
+        else:
+            tui.warning_message("Unity bridge not available — vision/OCR only")
+
+    persona = get_persona(cfg["default_persona"] if cfg else "casual")
+    observer = ScreenObserver()
+    executor = InputExecutor(safe_mode=safe_mode, action_delay=persona.input_delay)
+
+    ctx = ToolContext(
+        observer=observer, executor=executor, bridge=bridge, persona=persona,
+    )
+    # Live dashboard owns the screen while the agent runs.
+    with tui.agent_dashboard(goal, provider_name, provider.model, max_steps) as dash:
+        agent = QAAgent(
+            provider=provider, ctx=ctx, provider_name=provider_name,
+            max_steps=max_steps, on_event=dash.handle,
+        )
+        result = agent.run(goal)
+
+    reporter = ReportGenerator()
+    reporter.print_agent_report(result)
+    json_path = reporter.save_agent_json(result)
+    tui.system_message(f"JSON report saved → {json_path}")
+
+    if bridge is not None:
+        bridge.stop()
 
 
 def _interactive_run(args_list: list, ns: argparse.Namespace,
@@ -519,6 +616,21 @@ def cmd_run(args: argparse.Namespace) -> None:
     sys.exit(0)
 
 
+def cmd_agent(args: argparse.Namespace) -> None:
+    """Run the autonomous QA agent (non-interactive)."""
+    load_dotenv()
+    cfg = Config()
+    tui.print_banner()
+    _execute_agent(
+        args.goal,
+        cfg,
+        no_bridge=getattr(args, "no_bridge", False),
+        safe_mode=getattr(args, "safe_mode", False),
+        max_steps=getattr(args, "max_steps", 15),
+    )
+    sys.exit(0)
+
+
 def cmd_setup(args: argparse.Namespace) -> None:
     """Run setup wizard."""
     cfg = Config()
@@ -570,6 +682,17 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Skip Unity bridge (screen-capture only)")
     sub = parser.add_subparsers(dest="command")
 
+    # agent
+    agent_p = sub.add_parser("agent", help="Autonomous AI agent tests a natural-language goal")
+    agent_p.add_argument("goal", help="What to test, e.g. \"check the player can jump\"")
+    agent_p.add_argument("--no-bridge", action="store_true",
+                         help="Skip Unity bridge (vision/OCR only)")
+    agent_p.add_argument("--safe-mode", action="store_true",
+                         help="Log actions without executing them")
+    agent_p.add_argument("--max-steps", type=int, default=15,
+                         help="Max agent tool-calling steps (default: 15)")
+    agent_p.set_defaults(func=cmd_agent)
+
     # run
     run_p = sub.add_parser("run", help="Execute a test suite")
     run_p.add_argument("--suite", required=True, help="Path to YAML test suite")
@@ -617,7 +740,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _harden_console_encoding() -> None:
+    """Force UTF-8 (replace on error) so non-ASCII output never crashes the CLI
+    on legacy Windows consoles (e.g. the cp1258 Vietnamese codepage)."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001 — older/odd streams without reconfigure
+            pass
+
+
 def main() -> None:
+    _harden_console_encoding()
     parser = build_parser()
     args = parser.parse_args()
     _setup_logging(getattr(args, "verbose", False))

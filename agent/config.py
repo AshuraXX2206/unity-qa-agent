@@ -15,11 +15,17 @@ _CONFIG_DIR = Path.home() / ".qagent"
 _CONFIG_FILE = _CONFIG_DIR / "config.yaml"
 
 _DEFAULTS: Dict[str, Any] = {
-    "ai_provider": "gemini",           # "gemini" | "anthropic"
+    "ai_provider": "gemini",           # "gemini" | "anthropic" (legacy scripted verifier)
     "gemini_api_key": "",
     "anthropic_api_key": "",
     "gemini_model": "gemini-2.5-flash",
     "anthropic_model": "claude-sonnet-4-6",
+    # ── agentic mode (provider registry) ──────────────────────────────
+    "provider": "gemini",              # registry key in agent.llm.registry.PROVIDERS
+    "base_url": "",                    # override for openai_compat hosts
+    "model": "auto",                   # "auto" → query /models at runtime
+    "api_keys": {},                    # {provider_name: key}
+    # ── shared ────────────────────────────────────────────────────────
     "unity_ws_url": "ws://localhost:8765",
     "screenshot_interval": 0.5,
     "default_persona": "casual",
@@ -74,6 +80,47 @@ class Config:
     @property
     def unity_project_path(self) -> str:
         return self._data.get("unity_project_path", "")
+
+    # ── agentic mode (provider registry) ──────────────────────────────
+
+    @property
+    def provider_name(self) -> str:
+        return str(self._data.get("provider", "gemini"))
+
+    @property
+    def base_url(self) -> str:
+        return str(self._data.get("base_url", ""))
+
+    @property
+    def agent_model(self) -> str:
+        """Model id for agentic mode; ``"auto"`` means query /models at runtime."""
+        return str(self._data.get("model", "auto"))
+
+    @agent_model.setter
+    def agent_model(self, value: str) -> None:
+        self._data["model"] = value
+
+    @property
+    def agent_api_key(self) -> str:
+        """Active key for the selected agentic provider (config, then env var)."""
+        name = self.provider_name
+        keys = self._data.get("api_keys", {}) or {}
+        if keys.get(name):
+            return str(keys[name])
+        # Fall back to the registry's env var.
+        try:
+            from agent.llm.registry import PROVIDERS
+            spec = PROVIDERS.get(name)
+            if spec:
+                return os.getenv(spec.env_key, "")
+        except Exception:  # noqa: BLE001
+            pass
+        return ""
+
+    def set_agent_api_key(self, provider: str, key: str) -> None:
+        keys = dict(self._data.get("api_keys", {}) or {})
+        keys[provider] = key
+        self._data["api_keys"] = keys
 
     @property
     def data(self) -> Dict[str, Any]:

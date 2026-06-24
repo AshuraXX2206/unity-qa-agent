@@ -24,6 +24,7 @@ from rich.align import Align
 from rich.box import HEAVY, ROUNDED, SIMPLE
 from rich.columns import Columns
 from rich.console import Console, Group
+from rich.layout import Layout
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.markup import escape
@@ -49,23 +50,27 @@ console = Console()
 
 # ── Branding ──────────────────────────────────────────────────────────
 
-_BANNER = r"""
- ╦ ╦╔╗╔╦╔╦╗╦ ╦  ╔═╗ ╔═╗  ╔═╗╔═╗╔═╗╔╗╔╔╦╗
- ║ ║║║║║ ║ ╚╦╝  ║═╬╗╠═╣  ╠═╣║ ╦║╣ ║║║ ║
- ╚═╝╝╚╝╩ ╩  ╩   ╚═╝╚╩ ╩  ╩ ╩╚═╝╚═╝╝╚╝ ╩
-"""
+# Pure-ASCII wordmark (renders cleanly on any console codepage, incl. cp1258).
+_BANNER_LINES = [
+    r"  ___      _    ____ _____ _   _ _____",
+    r" / _ \    / \  / ___| ____| \ | |_   _|",
+    r"| | | |  / _ \| |  _|  _| |  \| | | |",
+    r"| |_| | / ___ \ |_| | |___| |\  | | |",
+    r" \__\_\/_/   \_\____|_____|_| \_| |_|",
+]
+_BANNER_SHADES = ["#5eead4", "#2dd4bf", "#22d3ee", "#38bdf8", "#3b82f6"]
 
 _VERSION = "0.1.0"
+_TAGLINE = "AI agent that plays and tests your Unity game"
 
 
 def print_banner() -> None:
-    banner_text = Text(_BANNER, style="bold cyan")
-    console.print(banner_text)
-    console.print(
-        Align.center(
-            Text(f"v{_VERSION} — AI-powered QA for Unity games", style="dim")
-        )
-    )
+    console.print()
+    for line, shade in zip(_BANNER_LINES, _BANNER_SHADES):
+        console.print(Text(line, style=f"bold {shade}"))
+    console.print()
+    console.print(Text(f"  Unity QA Agent  v{_VERSION}", style="bold white"))
+    console.print(Text(f"  {_TAGLINE}", style="dim"))
     console.print()
 
 
@@ -508,3 +513,224 @@ def create_suite_progress() -> Progress:
         TimeElapsedColumn(),
         console=console,
     )
+
+
+# ── Agentic live dashboard ─────────────────────────────────────────────
+
+
+# ASCII-safe markers — Windows consoles on non-UTF8 codepages (e.g. cp1258)
+# cannot encode emoji or braille, so the dashboard avoids both.
+_EVENT_STYLE = {
+    "thought": ("[~]", "cyan"),
+    "action": ("[>]", "bold yellow"),
+    "result": ("   ", "dim"),
+    "observation": ("[o]", "magenta"),
+    "finding": ("[*]", "bold green"),
+    "error": ("[x]", "bold red"),
+}
+
+_VERDICT_COLOR = {
+    "PASS": "green",
+    "FAIL": "red",
+    "BUG": "red",
+    "INCONCLUSIVE": "yellow",
+}
+
+
+class AgentDashboard:
+    """A live, multi-panel dashboard for the autonomous QA agent.
+
+    Renders the observe → reason → act loop in real time: a scrolling activity
+    feed on the left, run stats on the right, a goal header, and a status
+    footer. Use as a context manager around ``QAAgent.run`` and pass
+    :meth:`handle` as the agent's ``on_event`` callback. On exit it drops the
+    full activity log back into the scrollback so nothing is lost when the
+    alternate screen closes.
+    """
+
+    def __init__(
+        self,
+        goal: str,
+        provider: str,
+        model: str,
+        max_steps: int,
+        console: Console = console,
+    ) -> None:
+        self.goal = goal
+        self.provider = provider
+        self.model = model
+        self.max_steps = max_steps
+        self._console = console
+        self._start = time.monotonic()
+        self._step = 0
+        self._feed: List[Text] = []
+        self._tool_counts: Dict[str, int] = {}
+        self._status = "running"
+        self._verdict = ""
+        self._summary = ""
+        self._live: Optional[Live] = None
+
+    # ── context manager ────────────────────────────────────────────────
+
+    def __enter__(self) -> "AgentDashboard":
+        self._live = Live(
+            self, console=self._console, screen=True,
+            refresh_per_second=8, redirect_stdout=False, redirect_stderr=False,
+        )
+        self._live.start()
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+        self._dump_log()
+        return False
+
+    # ── event handling ─────────────────────────────────────────────────
+
+    def handle(self, kind: str, data: Any) -> None:
+        """``on_event`` callback for :class:`agent.qa_agent.QAAgent`."""
+        if kind == "step":
+            self._step = data.get("step", self._step)
+            return
+        if kind == "thought":
+            self._add("thought", _truncate(str(data), 240))
+        elif kind == "action":
+            name = data.get("name", "?")
+            self._tool_counts[name] = self._tool_counts.get(name, 0) + 1
+            self._add("action", f"{name}  [dim]{_compact(data.get('input', {}))}[/]")
+        elif kind == "result":
+            self._add("result", _truncate(str(data.get("text", "")), 100))
+        elif kind == "observation":
+            self._add("observation", "fresh observation captured")
+        elif kind == "finding":
+            self._verdict = str(data.get("verdict", "")).upper()
+            self._summary = str(data.get("summary", ""))
+            self._status = "done"
+            color = _VERDICT_COLOR.get(self._verdict, "yellow")
+            self._add("finding", f"[{color}]{self._verdict}[/] - {self._summary}")
+        elif kind == "error":
+            self._status = "error"
+            self._add("error", str(data))
+
+    # ── rendering ──────────────────────────────────────────────────────
+
+    def __rich__(self) -> Layout:
+        layout = Layout()
+        layout.split_column(
+            Layout(self._header(), name="header", size=4),
+            Layout(name="body", ratio=1),
+            Layout(self._footer(), name="footer", size=3),
+        )
+        layout["body"].split_row(
+            Layout(self._feed_panel(), name="feed", ratio=2),
+            Layout(self._side_panel(), name="side", size=36),
+        )
+        return layout
+
+    def _header(self) -> Panel:
+        grid = Table.grid(expand=True)
+        grid.add_column(justify="left", ratio=1)
+        grid.add_column(justify="right")
+        grid.add_row(
+            Text(f"GOAL  {self.goal}", style="bold white"),
+            Text(f"step {self._step}/{self.max_steps}", style="dim"),
+        )
+        grid.add_row(
+            Text(f"{self.provider} / {self.model}", style="cyan"),
+            Text(f"{self._elapsed():.0f}s", style="dim"),
+        )
+        return Panel(grid, title="[bold]Unity QA Agent[/]", border_style="cyan",
+                     padding=(0, 1))
+
+    def _feed_panel(self) -> Panel:
+        height = max(6, self._console.size.height - 9)
+        tail = self._feed[-height:]
+        body = Group(*tail) if tail else Text("waiting for the agent...", style="dim italic")
+        return Panel(body, title="[bold]Activity[/]", border_style="blue",
+                     padding=(0, 1))
+
+    def _side_panel(self) -> Panel:
+        table = Table.grid(padding=(0, 1))
+        table.add_column(style="bold", justify="right")
+        table.add_column()
+        table.add_row("Step", f"{self._step}/{self.max_steps}")
+        table.add_row("Elapsed", f"{self._elapsed():.0f}s")
+        table.add_row("Actions", str(sum(self._tool_counts.values())))
+        if self._verdict:
+            color = _VERDICT_COLOR.get(self._verdict, "yellow")
+            table.add_row("Verdict", f"[{color}]{self._verdict}[/]")
+
+        tools = Table.grid(padding=(0, 1))
+        tools.add_column(style="yellow")
+        tools.add_column(justify="right", style="dim")
+        if self._tool_counts:
+            for name, count in sorted(self._tool_counts.items(), key=lambda kv: -kv[1]):
+                tools.add_row(name, str(count))
+        else:
+            tools.add_row("[dim]no tools yet[/]", "")
+
+        body = Group(
+            table,
+            Rule(characters="-", style="dim"),
+            Text("Tool calls", style="bold"),
+            tools,
+        )
+        return Panel(body, title="[bold]Run Stats[/]", border_style="magenta",
+                     padding=(0, 1))
+
+    def _footer(self) -> Panel:
+        if self._status == "running":
+            content: Any = Columns(
+                [Spinner("line", style="cyan"), Text("agent is working...", style="cyan")],
+                padding=(0, 1),
+            )
+            border = "cyan"
+        elif self._status == "done":
+            color = _VERDICT_COLOR.get(self._verdict, "yellow")
+            content = Text(f"{self._verdict} - {self._summary}", style=f"bold {color}")
+            border = color
+        else:
+            content = Text("run ended with an error", style="bold red")
+            border = "red"
+        return Panel(content, border_style=border, padding=(0, 1))
+
+    # ── helpers ────────────────────────────────────────────────────────
+
+    def _add(self, kind: str, markup: str) -> None:
+        icon, style = _EVENT_STYLE.get(kind, ("•", "white"))
+        line = Text.from_markup(f"[{style}]{icon}[/] {markup}")
+        self._feed.append(line)
+
+    def _elapsed(self) -> float:
+        return time.monotonic() - self._start
+
+    def _dump_log(self) -> None:
+        """Reprint the full activity feed into normal scrollback."""
+        if not self._feed:
+            return
+        self._console.print(Panel(
+            Group(*self._feed),
+            title="[bold]Agent Activity Log[/]",
+            border_style="blue",
+            padding=(0, 1),
+        ))
+
+
+def agent_dashboard(goal: str, provider: str, model: str, max_steps: int) -> AgentDashboard:
+    """Convenience factory mirroring the other tui helpers."""
+    return AgentDashboard(goal, provider, model, max_steps)
+
+
+def _truncate(s: str, n: int) -> str:
+    s = s.strip().replace("\n", " ")
+    return s if len(s) <= n else s[: n - 2] + "..."
+
+
+def _compact(d: Dict[str, Any], n: int = 50) -> str:
+    import json
+    s = json.dumps(d, ensure_ascii=False)
+    if s in ("{}", ""):
+        return ""
+    return s if len(s) <= n else s[: n - 2] + "..."

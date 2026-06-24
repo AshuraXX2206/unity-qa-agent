@@ -33,64 +33,56 @@ def run_setup_wizard(config: Optional[Config] = None) -> Config:
     console.print()
 
     # ── Step 1: AI Provider ───────────────────────────────────────────
-    _step_header(1, "AI Provider")
-    console.print("  Choose your AI provider for test verification.\n")
+    from agent.llm.registry import PROVIDERS
 
-    provider = tui.prompt_choice(
-        "Select AI provider:",
-        ["gemini (Google — free tier available)", "anthropic (Claude)"],
-    )
-    provider_key = "gemini" if "gemini" in provider else "anthropic"
-    config["ai_provider"] = provider_key
+    _step_header(1, "AI Provider")
+    console.print("  Choose the AI provider that powers the agent.\n")
+
+    names = list(PROVIDERS.keys())
+    labels = [PROVIDERS[n].label for n in names]
+    chosen_label = tui.prompt_choice("Select AI provider:", labels)
+    provider_key = names[labels.index(chosen_label)]
+    spec = PROVIDERS[provider_key]
+    config["provider"] = provider_key
+    config["base_url"] = spec.base_url
+    # Keep the legacy scripted-verifier field aligned for gemini/anthropic.
+    if provider_key in ("gemini", "anthropic"):
+        config["ai_provider"] = provider_key
 
     # ── Step 2: API Key ───────────────────────────────────────────────
     _step_header(2, "API Key")
 
-    if provider_key == "gemini":
+    if spec.key_url:
         console.print(
-            "  Get your free Gemini API key at:\n"
-            "  [link=https://aistudio.google.com/apikey]"
-            "https://aistudio.google.com/apikey[/link]\n"
+            f"  Get your API key at:\n"
+            f"  [link={spec.key_url}]{spec.key_url}[/link]\n"
         )
-        key = tui.prompt_input("Enter your Gemini API key:")
-        if key:
+    key = tui.prompt_input(f"Enter your {spec.label.split(' (')[0]} API key:")
+    if key:
+        config.set_agent_api_key(provider_key, key)
+        # Mirror into legacy fields so scripted mode keeps working.
+        if provider_key == "gemini":
             config["gemini_api_key"] = key
-            tui.success_message("Gemini API key saved")
-        else:
-            tui.warning_message("No API key entered — AI verification will be disabled")
-    else:
-        console.print(
-            "  Get your Anthropic API key at:\n"
-            "  [link=https://console.anthropic.com/settings/keys]"
-            "https://console.anthropic.com/settings/keys[/link]\n"
-        )
-        key = tui.prompt_input("Enter your Anthropic API key:")
-        if key:
+        elif provider_key == "anthropic":
             config["anthropic_api_key"] = key
-            tui.success_message("Anthropic API key saved")
-        else:
-            tui.warning_message("No API key entered — AI verification will be disabled")
+        tui.success_message("API key saved")
+    else:
+        tui.warning_message("No API key entered — the agent won't be able to run")
 
     # ── Step 3: AI Model ──────────────────────────────────────────────
     _step_header(3, "AI Model")
-
-    if provider_key == "gemini":
-        model = tui.prompt_choice("Select Gemini model:", [
-            "gemini-2.5-flash (fast, recommended)",
-            "gemini-2.5-pro (most capable)",
-            "gemini-2.0-flash (balanced)",
-        ])
-        model_name = model.split(" ")[0]
-        config["gemini_model"] = model_name
+    console.print(
+        "  The agent auto-discovers the newest model via the provider's /models\n"
+        "  endpoint at runtime, so it stays current without code changes.\n"
+    )
+    pin = tui.prompt_confirm("Auto-select newest model each run? (recommended)", default=True)
+    if pin:
+        config["model"] = "auto"
+        tui.success_message("Model: auto (newest discovered at runtime)")
     else:
-        model = tui.prompt_choice("Select Anthropic model:", [
-            "claude-sonnet-4-6 (recommended)",
-            "claude-sonnet-4-20250514 (latest)",
-        ])
-        model_name = model.split(" ")[0]
-        config["anthropic_model"] = model_name
-
-    tui.success_message(f"Model set: {model_name}")
+        model_name = tui.prompt_input("Pin a specific model id:", "")
+        config["model"] = model_name or "auto"
+        tui.success_message(f"Model: {config['model']}")
 
     # ── Step 4: Unity Project Path ────────────────────────────────────
     _step_header(4, "Unity Project")
@@ -141,7 +133,8 @@ def run_setup_wizard(config: Optional[Config] = None) -> Config:
         f"Config saved to: [dim]{config.config_path()}[/]\n\n"
         f"[bold]Quick start:[/]\n"
         f"  [cyan]qagent[/]              — interactive mode\n"
-        f"  [cyan]qagent run[/]          — run test suites\n"
+        f"  [cyan]qagent agent \"...\"[/]  — autonomous AI agent (Claude-Code style)\n"
+        f"  [cyan]qagent run[/]          — run scripted test suites\n"
         f"  [cyan]qagent analyze[/]      — analyze Unity codebase\n"
         f"  [cyan]qagent generate[/]     — auto-generate tests\n"
         f"  [cyan]qagent setup[/]        — re-run this wizard\n"

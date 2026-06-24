@@ -191,6 +191,38 @@ class ReportGenerator:
         log.info("JSON report saved → %s", path)
         return str(path)
 
+    # ── agentic report ────────────────────────────────────────────────
+
+    def print_agent_report(self, result: Any) -> None:
+        """Render an :class:`agent.qa_agent.AgentRunResult` to the console."""
+        verdict = result.verdict
+        color = {"PASS": "green", "FAIL": "red", "BUG": "red"}.get(verdict, "yellow")
+
+        finding = result.findings[-1] if result.findings else None
+        body = (
+            f"[bold]Goal:[/] {result.goal}\n"
+            f"[bold]Provider:[/] {result.provider}    [bold]Model:[/] {result.model}\n"
+            f"[bold]Verdict:[/] [{color}]{verdict}[/]    "
+            f"[dim](stopped: {result.stopped_reason}, {len(result.steps)} tool calls)[/]"
+        )
+        if finding:
+            body += f"\n\n[bold]Summary:[/] {finding.summary}"
+            if finding.details:
+                body += f"\n[dim]{finding.details}[/]"
+
+        console.print()
+        console.print(Panel(body, title="Agentic QA Result", border_style=color))
+        console.print()
+
+    def save_agent_json(self, result: Any) -> str:
+        """Write an agentic run report and return its path."""
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        path = self._reports_dir / f"agent_report_{ts}.json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(result.to_dict(), f, indent=2, ensure_ascii=False)
+        log.info("Agent JSON report saved → %s", path)
+        return str(path)
+
     # ── helpers ───────────────────────────────────────────────────────
 
     @staticmethod
