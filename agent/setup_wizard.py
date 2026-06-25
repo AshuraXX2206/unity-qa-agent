@@ -45,6 +45,7 @@ def run_setup_wizard(config: Optional[Config] = None) -> Config:
     spec = PROVIDERS[provider_key]
     config["provider"] = provider_key
     config["base_url"] = spec.base_url
+    config["model"] = "auto"  # Reset model when provider changes
     # Keep the legacy scripted-verifier field aligned for gemini/anthropic.
     if provider_key in ("gemini", "anthropic"):
         config["ai_provider"] = provider_key

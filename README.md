@@ -9,12 +9,25 @@ once, type `qagent` from anywhere.
 qagent agent "check that pressing W moves the player forward"
 ```
 
-## Two modes
+Or just launch `qagent` and **talk to it** — a conversational agent understands
+plain language and decides what to do, calling its capabilities as tools:
+
+```
+> can the player jump?
+> analyse Assets/Scripts then generate tests for the combat system
+> which suites do I have and what do they cover?
+```
+
+## Three ways to use it
 
 | Mode | Command | What it is |
 |---|---|---|
-| **Agentic** (default) | `qagent agent "<goal>"` | An LLM autonomously drives the game in an observe → reason → act loop, like Claude Code for QA. |
+| **Conversational** | `qagent` (REPL) or `qagent ask "<msg>"` | A chat agent that answers questions *and* executes tasks by calling the capabilities below as tools. Remembers the conversation. |
+| **Agentic** | `qagent agent "<goal>"` | An LLM autonomously drives the game in an observe → reason → act loop, like Claude Code for QA. |
 | **Scripted** | `qagent run --suite x.yaml` | Deterministic YAML test suites with rule-based verification (the classic flow). |
+
+In the REPL the explicit commands below still work as shortcuts; anything that
+isn't a known command is handled by the conversational agent.
 
 ## Features
 
@@ -61,7 +74,8 @@ Settings persist in `~/.qagent/config.yaml`.
 ## Commands
 
 ```bash
-qagent                                   # interactive REPL
+qagent                                   # conversational REPL (talk to it in plain language)
+qagent ask "<message>"                   # one-shot: ask a question or give a task
 qagent agent "<goal>"                    # autonomous QA agent
 qagent agent "<goal>" --persona griefer  # test as a griefer (tries to break things)
 qagent agent "<goal>" --input bridge     # drive Unity via the WebSocket bridge
@@ -181,8 +195,9 @@ After each run the agent writes:
 unity-qa-agent/
 ├── unity-bridge/QABridge.cs        # C# bridge: state broadcast + simulated input
 ├── agent/
-│   ├── main.py                     # CLI + interactive REPL
-│   ├── qa_agent.py                 # agentic observe→reason→act loop
+│   ├── main.py                     # CLI + conversational REPL
+│   ├── orchestrator.py             # conversational agent: Q&A + runs capabilities as tools
+│   ├── qa_agent.py                 # agentic observe→reason→act loop (drives the game)
 │   ├── agent_tools.py              # tools the agent calls (screenshot, input, …)
 │   ├── llm/                        # provider abstraction
 │   │   ├── base.py                 #   neutral interface + types
@@ -222,7 +237,8 @@ verifies the full read-state / send-action loop without needing Unity.
 ## Troubleshooting
 
 - **`qagent` not found** — the Python `Scripts` dir isn't on PATH; add it and open a new terminal.
-- **No model / "could not discover"** — set a provider key via `qagent setup`; check `qagent models`.
+- **No model / "could not discover"** — set a provider key via `qagent setup`; check `qagent models` (it now lists only chat-capable models and marks which one `auto` picks).
+- **`[provider error 429: Rate limit reached …]`** — you hit the free tier's tokens-per-minute cap. The agent auto-retries when the host tells it how long to wait; if it keeps happening, pin a lighter model (e.g. `qagent config` → set Agent Model to `llama-3.1-8b-instant` on Groq) instead of a large reasoning model.
 - **Bridge won't connect** — ensure Unity is in Play mode, `QABridge` enabled, port `8765` open. The client retries, then falls back to screen-only mode.
 - **Agent input does nothing in-game** — wire `QAInput` (legacy Input Manager) or confirm the New Input System package is installed; or use `--input os`.
 - **OCR misses text** — verify `tesseract --version`; heavy font effects reduce accuracy — prefer `screen_image` template matching.

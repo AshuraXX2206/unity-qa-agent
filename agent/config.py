@@ -32,6 +32,12 @@ _DEFAULTS: Dict[str, Any] = {
     "unity_project_path": "",
     "safe_mode": False,
     "setup_complete": False,
+    "mcp_servers": {
+        "unity": {
+            "command": "npx",
+            "args": ["-y", "@iflow-mcp/unity-mcp-server"]
+        }
+    },
 }
 
 
@@ -81,6 +87,11 @@ class Config:
     def unity_project_path(self) -> str:
         return self._data.get("unity_project_path", "")
 
+    @property
+    def mcp_servers(self) -> Dict[str, Any]:
+        """Dictionary of MCP server configs (e.g. {'unity': {'command': 'npx', ...}})."""
+        return self._data.get("mcp_servers", {})
+
     # ── agentic mode (provider registry) ──────────────────────────────
 
     @property
@@ -94,10 +105,31 @@ class Config:
     @property
     def agent_model(self) -> str:
         """Model id for agentic mode; ``"auto"`` means query /models at runtime."""
-        return str(self._data.get("model", "auto"))
+        name = self.provider_name
+        pm = self._data.get("provider_models", {})
+        if name in pm:
+            return str(pm[name])
+        
+        legacy_model = str(self._data.get("model", "auto"))
+        legacy_lower = legacy_model.lower()
+        
+        # Heuristic to prevent using incompatible legacy models when provider changes
+        if legacy_lower != "auto":
+            if name == "groq" and ("gemini" in legacy_lower or "claude" in legacy_lower):
+                return "auto"
+            if name == "gemini" and "gemini" not in legacy_lower:
+                return "auto"
+            if name == "anthropic" and "claude" not in legacy_lower:
+                return "auto"
+                
+        return legacy_model
 
     @agent_model.setter
     def agent_model(self, value: str) -> None:
+        name = self.provider_name
+        pm = self._data.get("provider_models", {})
+        pm[name] = value
+        self._data["provider_models"] = pm
         self._data["model"] = value
 
     @property

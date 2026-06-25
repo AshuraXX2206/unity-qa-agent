@@ -123,6 +123,18 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "plan_action",
+        "description": "Log a short-term or long-term plan before taking action. Use this to think step-by-step, state your hypothesis, and decide what to do next to avoid looping.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "thought": {"type": "string", "description": "Your analysis of the current state and hypothesis"},
+                "plan": {"type": "string", "description": "The steps you intend to take"}
+            },
+            "required": ["thought", "plan"],
+        },
+    },
+    {
         "name": "report_finding",
         "description": "Report your final QA conclusion for the goal and END the test. Call this exactly once when you have enough evidence.",
         "input_schema": {
@@ -226,7 +238,14 @@ def _h_report_finding(args: Dict[str, Any], ctx: ToolContext) -> List[Dict[str, 
     return [_text(f"Recorded finding: {finding.verdict} - {finding.summary}")]
 
 
+def _h_plan_action(args: Dict[str, Any], ctx: ToolContext) -> List[Dict[str, Any]]:
+    thought = args.get("thought", "")
+    plan = args.get("plan", "")
+    return [_text(f"Plan recorded. Proceed with your planned actions.")]
+
+
 _HANDLERS = {
+    "plan_action": _h_plan_action,
     "capture_screenshot": _h_capture_screenshot,
     "read_game_state": _h_read_game_state,
     "press_key": _h_press_key,

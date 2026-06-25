@@ -34,10 +34,16 @@ player: you can see the screen, read structured game state, and send keyboard \
 and mouse input through tools.
 
 Your job: investigate the goal below and determine whether the game behaves \
-correctly. Work in small steps — act, then observe the result before acting \
-again. Don't assume; verify with capture_screenshot and read_game_state.
+correctly. You MUST follow the Observe-Reason-Act loop:
+1. Observe: Always start by checking `read_game_state` and/or `capture_screenshot` to understand the current situation.
+2. Reason: Before taking physical actions (moving, clicking), call `plan_action` to state your hypothesis, explain what you observe, and detail your plan.
+3. Act: Execute the tools (press_key, mouse_click, etc.) required for your plan.
+
+ANTI-LOOPING RULE: If you perform an action and the game state or screen does NOT change as expected, DO NOT repeat the same action endlessly. Stop, call `plan_action` to formulate a new approach, and try something different.
+
 {persona}
-When you have enough evidence, call report_finding exactly once with your \
+
+When you have enough evidence, call `report_finding` exactly once with your \
 verdict (PASS, FAIL, BUG, or INCONCLUSIVE) and stop. Be efficient — a handful \
 of well-chosen actions beats dozens of random ones.
 
@@ -57,7 +63,7 @@ _PERSONA_HINTS = {
                "Report any glitch or unexpected behaviour as a BUG.",
 }
 
-_DEFAULT_MAX_STEPS = 15
+_DEFAULT_MAX_STEPS = 25
 
 
 @dataclass
@@ -101,12 +107,14 @@ class QAAgent:
         provider_name: str = "",
         max_steps: int = _DEFAULT_MAX_STEPS,
         on_event: Optional[Any] = None,   # callable(kind, payload) for live TUI
+        mcp_manager: Optional[Any] = None,
     ) -> None:
         self._provider = provider
         self._ctx = ctx
         self._provider_name = provider_name
         self._max_steps = max_steps
         self._on_event = on_event
+        self._mcp_manager = mcp_manager
 
     def run(self, goal: str) -> AgentRunResult:
         system = _SYSTEM_PROMPT.format(goal=goal, persona=self._persona_block())
@@ -134,7 +142,10 @@ class QAAgent:
         in_tok = out_tok = 0
         for step in range(self._max_steps):
             self._emit("step", {"step": step + 1, "max": self._max_steps})
-            resp = self._provider.chat(system, messages, TOOL_SCHEMAS)
+            schemas = list(TOOL_SCHEMAS)
+            if getattr(self, "_mcp_manager", None):
+                schemas.extend(self._mcp_manager.get_all_tools())
+            resp = self._provider.chat(system, messages, schemas)
             in_tok += resp.usage.get("input_tokens", 0)
             out_tok += resp.usage.get("output_tokens", 0)
             result.total_tokens = in_tok + out_tok
@@ -170,7 +181,15 @@ class QAAgent:
             acted = False
             for tc in resp.tool_calls:
                 self._emit("action", {"name": tc.name, "input": tc.input})
-                blocks = dispatch(tc.name, tc.input, self._ctx)
+                if tc.name.startswith("mcp__") and getattr(self, "_mcp_manager", None):
+                    parts = tc.name.split("__", 2)
+                    if len(parts) == 3:
+                        res_text = self._mcp_manager.call_tool(parts[1], parts[2], tc.input)
+                        blocks = [{"type": "text", "text": res_text}]
+                    else:
+                        blocks = [{"type": "text", "text": f"Error: invalid mcp tool name {tc.name}"}]
+                else:
+                    blocks = dispatch(tc.name, tc.input, self._ctx)
                 self._emit("result", {"name": tc.name, "text": _result_summary(blocks)})
                 tool_result_blocks.append({
                     "type": "tool_result", "tool_use_id": tc.id, "content": blocks,

@@ -101,7 +101,11 @@ class BridgeClient:
 
     def _run_loop(self) -> None:
         asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._connect_loop())
+        try:
+            self._loop.run_until_complete(self._connect_loop())
+        except RuntimeError as e:
+            if "Event loop stopped" not in str(e):
+                raise
 
     async def _connect_loop(self) -> None:
         retries = 0

@@ -11,10 +11,8 @@ Provides:
 
 from __future__ import annotations
 
-import itertools
 import sys
 import time
-import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,73 +58,256 @@ _BANNER_LINES = [
 ]
 _BANNER_SHADES = ["#5eead4", "#2dd4bf", "#22d3ee", "#38bdf8", "#3b82f6"]
 
+# Shared palette so every surface feels like one product, not a grab-bag of colors.
+ACCENT = "#22d3ee"       # primary  (cyan)
+ACCENT2 = "#5eead4"      # secondary (teal)
+ACCENT3 = "#38bdf8"      # tertiary  (sky)
+MUTED = "grey58"
+# A teal chevron prompt — '›' (U+203A) is present in cp1258, so it's safe.
+PROMPT = f"[bold {ACCENT2}]›[/] "
+
 _VERSION = "0.1.0"
 _TAGLINE = "AI agent that plays and tests your Unity game"
 
 
 def print_banner() -> None:
+    """Gradient wordmark followed by a single, tidy meta line."""
     console.print()
     for line, shade in zip(_BANNER_LINES, _BANNER_SHADES):
-        console.print(Text(line, style=f"bold {shade}"))
+        console.print(Text("   " + line, style=f"bold {shade}"))
+    meta = Text("   ")
+    meta.append("Unity QA Agent", style=f"bold {ACCENT2}")
+    meta.append(f"  v{_VERSION}", style="dim")
+    meta.append("   ·   ", style=MUTED)
+    meta.append(_TAGLINE, style="italic grey70")
     console.print()
-    console.print(Text(f"  Unity QA Agent  v{_VERSION}", style="bold white"))
-    console.print(Text(f"  {_TAGLINE}", style="dim"))
+    console.print(meta)
+    console.print()
+
+
+def print_welcome(provider: str = "", model: str = "", persona: str = "") -> None:
+    """A 'getting started' card plus a live status strip, shown on REPL entry.
+
+    Replaces the old two dim lines with something that both teaches (example
+    prompts) and reassures (shows the current provider/model wiring), so the
+    landing screen feels alive instead of static.
+    """
+    examples = [
+        "can the player jump?",
+        "analyse Assets/Scripts and generate tests for the combat system",
+        "run the basic movement suite as a griefer",
+        "which test suites do I have, and what do they cover?",
+    ]
+    tips = Table.grid(padding=(0, 1))
+    tips.add_column(style=ACCENT, no_wrap=True, justify="right")
+    tips.add_column()
+    for ex in examples:
+        tips.add_row("›", Text(ex, style="grey85"))
+
+    body = Group(
+        Text("Ask me anything in plain language — I'll plan it and drive the tools myself.",
+             style="white"),
+        Text(),
+        Text("TRY ASKING", style=f"bold {ACCENT2}"),
+        tips,
+        Text(),
+        Text.assemble(("Prefer commands?  Type ", "dim"),
+                      ("help", f"bold {ACCENT}"), ("  for the full list.", "dim")),
+    )
+    console.print(Panel(
+        body,
+        title=f"[bold {ACCENT}]Getting started[/]",
+        title_align="left",
+        border_style=ACCENT,
+        box=ROUNDED,
+        padding=(1, 2),
+    ))
+
+    # Status strip: current wiring at a glance.
+    strip = Text("   ")
+    for label, value in (
+        ("provider", provider or "—"),
+        ("model", model or "auto"),
+        ("persona", persona or "casual"),
+    ):
+        strip.append(f"{label} ", style="dim")
+        strip.append(value, style=f"bold {ACCENT2}")
+        strip.append("   ·   ", style=MUTED)
+    strip.append("Ctrl+C", style="dim")
+    strip.append(" to exit", style="dim")
+    console.print(strip)
     console.print()
 
 
 # ── Thinking / Streaming spinner ──────────────────────────────────────
 
 
-class ThinkingIndicator:
-    """Animated 'thinking…' spinner like Claude Code's streaming indicator."""
-
-    _FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-
-    def __init__(self, label: str = "Thinking") -> None:
-        self._label = label
-        self._live: Optional[Live] = None
-        self._start: float = 0
-        self._running = False
-        self._thread: Optional[threading.Thread] = None
-
-    def start(self) -> None:
-        self._start = time.monotonic()
-        self._running = True
-        self._thread = threading.Thread(target=self._animate, daemon=True)
-        self._thread.start()
-
-    def stop(self, final_label: Optional[str] = None) -> None:
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=2)
-        elapsed = time.monotonic() - self._start
-        label = final_label or self._label
-        console.print(
-            Text(f"  {label} ", style="bold cyan"),
-            Text(f"({elapsed:.1f}s)", style="dim"),
-        )
-
-    def _animate(self) -> None:
-        frames = itertools.cycle(self._FRAMES)
-        while self._running:
-            elapsed = time.monotonic() - self._start
-            frame = next(frames)
-            status = f"\r  {frame} [cyan]{self._label}[/] [dim]({elapsed:.1f}s)[/]"
-            console.print(status, end="")
-            time.sleep(0.08)
-        # Clear line
-        console.print("\r" + " " * 60, end="\r")
-
-
 @contextmanager
 def thinking(label: str = "Thinking") -> Generator[None, None, None]:
-    """Context manager for a thinking spinner."""
-    t = ThinkingIndicator(label)
-    t.start()
+    """A single, self-clearing status line while some work runs.
+
+    Uses Rich's Live-based ``console.status`` (ASCII ``line`` spinner — cp1258
+    safe) rather than a hand-rolled ``\\r`` loop. The old loop fought with
+    interleaved log output on the legacy Windows console, which is what made the
+    spinner reprint itself on every frame ("Discovering newest model (0.1s)
+    (0.2s) …"). Rich coordinates the live region with logging, so this stays on
+    one line.
+    """
+    start = time.monotonic()
     try:
-        yield
+        with console.status(f"[{ACCENT}]{label}[/]", spinner="line",
+                            spinner_style=ACCENT):
+            yield
     finally:
-        t.stop()
+        elapsed = time.monotonic() - start
+        console.print(f"  [bold {ACCENT}]{label}[/] [dim]({elapsed:.1f}s)[/]")
+
+
+# ── High-end live "thinking" stream ───────────────────────────────────
+
+# All glyphs below are ASCII or live in cp1252/cp1258 ('•'=0x95, '·'=0xB7), so
+# the premium animation never depends on a braille-capable font.
+_SHIMMER_TRAIL = [f"bold {ACCENT2}", f"bold {ACCENT}", ACCENT3, "grey54"]
+
+
+def _shimmer(label: str, t: float) -> Text:
+    """A bright highlight sweeping left→right across *label*, trailing the
+    teal→cyan→sky palette — a font-safe way to feel 'alive' while we wait."""
+    text = Text()
+    head = int(t * 11) % (len(label) + 7)
+    for i, ch in enumerate(label):
+        d = head - i
+        if d == 0:
+            style = "bold white"
+        elif 1 <= d <= len(_SHIMMER_TRAIL):
+            style = _SHIMMER_TRAIL[d - 1]
+        else:
+            style = "grey42"
+        text.append(ch, style=style)
+    return text
+
+
+class _WorkingLine:
+    """A self-animating renderable: pulsing bullet · shimmer label · dots · timer."""
+
+    def __init__(self, label: str, start: float) -> None:
+        self._label = label
+        self._start = start
+
+    def __rich__(self) -> Text:
+        t = time.monotonic() - self._start
+        out = Text("  ")
+        out.append("• ", style=_SHIMMER_TRAIL[int(t * 6) % len(_SHIMMER_TRAIL)])
+        out.append(_shimmer(self._label, t))
+        out.append(("." * (int(t * 3) % 4)).ljust(3), style=ACCENT)
+        out.append(f"   {t:.1f}s", style="grey42")
+        return out
+
+
+class ThinkingStream:
+    """High-end live feedback for one agent turn.
+
+    A shimmering 'working' line animates while the model thinks; between LLM
+    calls, the model's narration and each tool call drop into the scrollback as
+    a persistent feed. The live line is paused around tool execution so a tool
+    that opens its own ``Live`` (progress bar, dashboard) never nests.
+    """
+
+    def __init__(self, console: Console = console) -> None:
+        self._console = console
+        self._live: Optional[Live] = None
+        self._start = time.monotonic()
+
+    # ── live spinner ────────────────────────────────────────────────────
+
+    def think(self, label: str = "Thinking") -> None:
+        renderable = _WorkingLine(label, self._start)
+        if self._live is None:
+            self._live = Live(renderable, console=self._console,
+                              refresh_per_second=12, transient=True)
+            self._live.start()
+        else:
+            self._live.update(renderable)
+
+    def stop(self) -> None:
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+
+
+def narration(text: str) -> None:
+    """A quiet, dim-italic line for the model's reasoning between tool steps."""
+    clean = " ".join(str(text).split())
+    if clean:
+        console.print(Padding(
+            Text(_truncate(clean, 280), style="italic grey62"), (0, 0, 0, 4)))
+
+
+def tool_call_line(name: str, args: Dict[str, Any]) -> None:
+    """A single line announcing a tool the agent decided to call."""
+    line = Text("  ")
+    line.append("• ", style=f"bold {ACCENT}")
+    line.append(str(name), style=f"bold {ACCENT2}")
+    compact = _compact(args or {})
+    if compact:
+        line.append(f"  {compact}", style="grey50")
+    console.print(line)
+
+
+class ResponseStream:
+    """A QAgent answer that types itself out, then settles into a tidy panel.
+
+    ``feed`` is called with each text chunk as it streams in; a Rich ``Live``
+    re-renders a growing panel so the reply appears progressively instead of
+    landing as one wall of text. ``finalize_answer`` re-renders the completed
+    text as Markdown (bold, lists, code) and stops the live region, leaving the
+    finished panel in the scrollback. ``finalize_narration`` instead settles the
+    streamed text as a dim reasoning line (used when the turn ends in a tool
+    call rather than a reply).
+    """
+
+    def __init__(self, console: Console = console, title: str = "QAgent") -> None:
+        self._console = console
+        self._title = title
+        self._text = ""
+        self._live: Optional[Live] = None
+
+    def feed(self, chunk: str) -> None:
+        if not chunk:
+            return
+        self._text += chunk
+        if self._live is None:
+            self._live = Live(self._panel(Text(self._text, style="grey93")),
+                              console=self._console, refresh_per_second=12,
+                              vertical_overflow="visible")
+            self._live.start()
+        else:
+            self._live.update(self._panel(Text(self._text, style="grey93")))
+
+    def finalize_answer(self) -> None:
+        rendered = self._panel(Markdown(self._text)) if self._text else None
+        if self._live is not None:
+            if rendered is not None:
+                self._live.update(rendered)
+            self._live.stop()
+            self._live = None
+        elif rendered is not None:
+            self._console.print(rendered)
+
+    def finalize_narration(self) -> None:
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+        narration(self._text)
+
+    @property
+    def text(self) -> str:
+        return self._text
+
+    def _panel(self, body: Any) -> Panel:
+        return Panel(body, title=f"[bold {ACCENT}]{self._title}[/]",
+                     title_align="left", border_style=ACCENT, box=ROUNDED,
+                     padding=(1, 2))
 
 
 # ── Step-by-step execution display ────────────────────────────────────
@@ -448,8 +629,10 @@ def agent_message(text: str) -> None:
     console.print()
     console.print(Panel(
         Markdown(text),
-        title="[bold cyan]Agent[/]",
-        border_style="cyan",
+        title=f"[bold {ACCENT}]QAgent[/]",
+        title_align="left",
+        border_style=ACCENT,
+        box=ROUNDED,
         padding=(1, 2),
     ))
 
